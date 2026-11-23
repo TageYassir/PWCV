@@ -1,0 +1,3713 @@
+# ======================
+# IMPORTS AND LIBRARIES
+# ======================
+import cv2
+import pyautogui
+import time
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk
+import threading
+import keyboard
+import sys
+import os
+import webbrowser
+from ctypes import windll  # For taskbar icon on Windows
+import math
+import speech_recognition as sr
+from collections import deque
+import numpy as np
+
+# Mediapipe imports
+import mediapipe as mp
+from mediapipe import solutions
+
+# YOLO import
+from ultralytics import YOLO  # For object detection
+
+from attempt_18.AdaptiveVoiceRecognizer_v24 import AdaptiveVoiceRecognizer
+from attempt_18.cookies import UserPreferences
+
+pyautogui.FAILSAFE = False
+
+
+# Need to check if it is working or not need to check also the high mode
+
+# ======================
+# COLOR THEMES
+# ======================
+THEMES = {
+    "Default": {
+        "primary": "#D8C7B9",
+        "secondary": "#C0A08F",
+        "accent": "#A09391",
+        "light": "#E8D0B9",
+        "neutral": "#C0C0C1",
+        "text": "#333333",
+        "error": "#FF3333",
+        "social": "#4A6FA5",
+        "warning": "#FFA500",
+        "font": ("Helvetica", 10)
+    },
+    "Dark Mode": {
+        "primary": "#2D2D2D",
+        "secondary": "#1E1E1E",
+        "accent": "#3A3A3A",
+        "light": "#4A4A4A",
+        "neutral": "#5A5A5A",
+        "text": "#E0E0E0",
+        "error": "#FF5252",
+        "social": "#64B5F6",
+        "warning": "#FFB74D",
+        "font": ("Consolas", 10, "bold")
+    },
+    "Ocean Blue": {
+        "primary": "#E1F5FE",
+        "secondary": "#B3E5FC",
+        "accent": "#4FC3F7",
+        "light": "#E1F5FE",
+        "neutral": "#BBDEFB",
+        "text": "#01579B",
+        "error": "#D32F2F",
+        "social": "#0288D1",
+        "warning": "#FFA000",
+        "font": ("Arial", 10, "italic")
+    },
+    "Forest Green": {
+        "primary": "#E8F5E9",
+        "secondary": "#C8E6C9",
+        "accent": "#81C784",
+        "light": "#E8F5E9",
+        "neutral": "#A5D6A7",
+        "text": "#1B5E20",
+        "error": "#C62828",
+        "social": "#2E7D32",
+        "warning": "#EF6C00",
+        "font": ("Verdana", 10)
+    },
+    "Sunset": {
+        "primary": "#FFF3E0",
+        "secondary": "#FFE0B2",
+        "accent": "#FFB74D",
+        "light": "#FFF3E0",
+        "neutral": "#FFCC80",
+        "text": "#E65100",
+        "error": "#D84315",
+        "social": "#FF6D00",
+        "warning": "#FF8F00",
+        "font": ("Comic Sans MS", 10)
+    }
+}
+
+# ======================
+# MAIN APPLICATION CLASS
+# ======================
+class PoseGestureControl:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PWCV")
+
+        # Initialize preferences
+        self.preferences = UserPreferences()
+        self.preferences.load_preferences()
+
+        # Set theme from preferences
+        self.current_theme = self.preferences.get('theme', 'Sunset')
+        self.colors = THEMES[self.current_theme]
+
+        # Set window size and make it non-resizable
+        self.root.geometry("1300x720")
+        self.root.resizable(False, False)
+
+        # Set application icons
+        self.setup_icons()
+
+        # ======================
+        # APPLICATION SETTINGS (with defaults from preferences)
+        # ======================
+        self.slide_delay = self.preferences.get('slide_delay', 1.0)
+        self.base_zoom_factor = self.preferences.get('base_zoom_factor', 1.0)
+        self.dynamic_zoom = self.preferences.get('dynamic_zoom', False)
+        self.width, self.height = 640, 480  # Camera resolution
+        self.pose_threshold = 0.7  # Pose detection confidence
+        self.gesture_threshold = 0.5  # Gesture sensitivity
+        self.posture_timeout = 3.0  # Time to show posture warning
+        self.validate_posture = self.preferences.get('validate_posture', False)
+
+        # ======================
+        # APPLICATION STATE
+        # ======================
+        self.running = True
+        self.control_active = False
+        self.show_camera = False
+        self.last_gesture_time = 0
+        self.shoulder_distance_ref = None
+        self.last_posture_warning_time = 0
+        self.valid_posture = False
+
+        # Pointer mode variables
+        self.pointer_mode = False
+        self.both_hands_up_start = 0
+        self.both_hands_up_threshold = 3.0
+        self.prev_x, self.prev_y = 0, 0
+        self.smoothing_factor = 0.3
+        self.click_threshold = 30
+        self.pointer_speed_multiplier = self.preferences.get('pointer_speed', 2.5)
+        self.finger_detected = False
+        self.click_detected = False
+
+        # Camera device handling
+        self.available_cameras = []  # list of (index, name) tuples
+        self.selected_camera_index = self.preferences.get('camera_index', 0)
+        self.update_camera_list()  # populate using pygrabber
+        self._camera_failure_count = 0
+        self._camera_failure_threshold = 30  # consecutive failures before error
+        self._camera_error_shown = False
+
+        # Microphone device handling
+        self.available_microphones = []  # list of (index, name) tuples
+        self.selected_microphone_index = self.preferences.get('microphone_index', 0)
+        self.update_microphone_list()  # populate using pyaudio
+
+        # Toggle mode variables
+        self.enable_toggle_mode_nearby = self.preferences.get('enable_toggle_mode_nearby', True)
+        self.enable_toggle_mode_conference = self.preferences.get('enable_toggle_mode_conference', False)
+
+        # Camera mode (normal/high)
+        self.camera_mode_var = tk.StringVar(value=self.preferences.get('camera_mode', 'normal'))
+        self._original_process_control_mode = self.process_control_mode_normal
+        self._high_process_control_mode = self.process_control_mode_high
+        if self.camera_mode_var.get() == 'high':
+            self.process_control_mode = self._high_process_control_mode
+        else:
+            self.process_control_mode = self._original_process_control_mode
+
+        # Pose estimation settings
+        self.enable_pose_estimation = self.preferences.get('enable_pose_estimation', False)
+        self.pose_estimation_model = None
+        self.pose_landmarker = None
+
+        # Furniture detection
+        self.enable_furniture_detection = self.preferences.get('enable_furniture_detection', False)
+        self.furniture_model = None
+        self.chair_distance_threshold = 0.3
+        self.table_distance_threshold = 0.4
+        self.load_furniture_model()
+
+        # Teacher/student mode
+        self.teacher_mode_active = self.preferences.get('teacher_mode_active', False)
+
+        # Voice control
+        self.voice_recognizer = None
+        self.enable_voice_control = self.preferences.get('enable_voice_control', False)
+        self.voice_stop_event = threading.Event()
+        self.voice_listening_thread = None
+        self.voice_control_var = tk.BooleanVar(value=self.enable_voice_control)
+        self.voice_lang_var = tk.StringVar(value=self.preferences.get('voice_language', 'en'))
+
+        # Mode variable for settings UI (must be created early)
+        self.mode_var = tk.StringVar(value="custom")
+
+        # ======================
+        # EYE CONTROL SETTINGS
+        # ======================
+        self.eye_control_enabled = self.preferences.get('eye_control_enabled', False)
+        self.hold_time = self.preferences.get('hold_time', 0.3)  # seconds to hold eye closed
+        self.click_cooldown = self.preferences.get('click_cooldown', 1.5)  # seconds between clicks
+        self.calibrated_threshold = self.preferences.get('calibrated_threshold', None)
+
+        # Eye detection state
+        self.eye_closure_start = None
+        self.closure_eye = None
+        self.last_click_time = 0
+
+        # Smoothing buffers (deque with maxlen)
+        self.left_smooth = deque(maxlen=5)
+        self.right_smooth = deque(maxlen=5)
+        self.avg_smooth = deque(maxlen=5)
+
+        # Calibration state
+        self.calibrating_eye = False
+        self.calib_frames = []
+        self.calib_frames_needed = 30
+
+        # MediaPipe Face Mesh (with iris refinement)
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,  # more accurate eye landmarks
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+
+        # Pinch click (Nearby mode only)
+        self.pinch_click_enabled = self.preferences.get('pinch_click_enabled', True)
+        self.pinch_active = False
+        self.last_pinch_click_time = 0
+        self.pinch_threshold = 0.05  # normalized distance
+
+        # Two‑finger toggle (still used)
+        self.two_fingers_gesture_start = None
+        self.two_fingers_toggle_threshold = 2.0  # seconds to toggle pointer mode
+
+        self.use_laser_hotkey = self.preferences.get('use_laser_hotkey', True)
+
+        # President mode
+        self.president_mode = self.preferences.get('president_mode', False)
+
+        # ======================
+        # INITIALIZE COMPONENTS
+        # ======================
+        self.setup_hotkeys()
+        self.setup_camera()  # now uses self.selected_camera_index
+        self.setup_pose_detection()
+        self.create_menu()
+        self.configure_styles()
+        self.create_welcome_screen()
+
+        # Start video thread
+        self.start_video_thread()
+
+        # Status variable
+        self.status_var = tk.StringVar()
+        self.status_var.set("Application initialized")
+
+        self.icon_path = "app.ico"  # Update with your actual path
+
+        # Initialize pose estimation if enabled
+        if self.enable_pose_estimation:
+            self.initialize_pose_estimation()
+
+        # Apply any remaining UI preferences after a short delay (ensures widgets exist)
+        self.root.after(100, lambda: self.preferences.apply_preferences(self))
+
+    def configure_styles(self):
+        """Configure tkinter styles based on current theme"""
+        style = ttk.Style()
+        style.theme_use('clam')
+
+        # Base styles
+        style.configure('.', background=self.colors["primary"], font=self.colors["font"])
+        style.configure('TFrame', background=self.colors["primary"])
+        style.configure('TLabel', background=self.colors["primary"], foreground=self.colors["text"])
+        style.configure('TButton', background=self.colors["secondary"], foreground=self.colors["text"])
+        style.configure('Accent.TButton', background=self.colors["accent"], foreground="white")
+        style.configure('Social.TButton', background=self.colors["social"], foreground="white")
+        style.configure('Toolbutton', background=self.colors["secondary"], foreground=self.colors["text"])
+
+        # Style maps
+        style.map('Toolbutton',
+                  background=[('selected', self.colors["accent"]), ('active', self.colors["light"])],
+                  foreground=[('selected', 'white'), ('active', self.colors["text"])])
+
+    def map_value(self, value, in_min, in_max, out_min, out_max):
+        """Map value with movement multiplier"""
+        mapped_value = (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+        center = (out_max + out_min) / 2
+        return center + (mapped_value - center) * self.pointer_speed_multiplier
+
+    def setup_icons(self):
+        """Set up application icons for window and taskbar"""
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), r"C:\Users\fftt7\PyCharmMiscProject\PWCV\attempt_14\app.ico")
+            self.root.iconbitmap(icon_path)
+
+            if os.name == 'nt':
+                try:
+                    windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.tagemouati.pwcv')
+                except Exception as e:
+                    print(f"Error setting taskbar icon: {e}")
+
+        except Exception as e:
+            print(f"Could not load icons: {e}")
+            try:
+                icon = tk.PhotoImage(width=16, height=16)
+                self.root.iconphoto(False, icon)
+            except:
+                pass
+
+    def create_menu(self):
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Exit", command=self.quit_application)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        sections_menu = tk.Menu(menubar, tearoff=0)
+        sections_menu.add_command(label="Main App", command=lambda: [self.stop_control(), self.show_main_app()])
+        sections_menu.add_command(label="Settings", command=lambda: [self.stop_control(), self.show_settings()])
+        sections_menu.add_command(label="Camera", command=lambda: [self.stop_control(), self.create_camera_settings()])
+        sections_menu.add_command(label="Voice", command=lambda: [self.stop_control(), self.create_voice_settings()])
+        sections_menu.add_command(label="About", command=lambda: [self.stop_control(), self.show_about()])
+        menubar.add_cascade(label="Sections", menu=sections_menu)
+
+        self.root.config(menu=menubar)
+
+    def create_welcome_screen(self):
+        self.clear_frame()
+
+        welcome_frame = tk.Frame(self.root, bg=self.colors["primary"])
+        welcome_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Check if we have existing preferences
+        has_preferences = self.preferences.load_preferences()
+
+        # If we have preferences, skip the mode selection and go directly to main app
+        if has_preferences:
+            # Only apply basic preferences that are safe to apply at this stage
+            self.apply_basic_preferences()
+            # Add a small delay to show the welcome screen briefly
+            title_label = tk.Label(
+                welcome_frame,
+                text="Welcome to PWCV",
+                font=("Helvetica", 24, "bold"),
+                bg=self.colors["primary"],
+                fg=self.colors["text"]
+            )
+            title_label.pack(pady=(40, 10))
+
+            warning_label = tk.Label(
+                welcome_frame,
+                text="IMPORTANT: For full functionality, the camera must be directly facing the presenter with no obstacles in between.",
+                font=("Helvetica", 11, "bold"),
+                bg=self.colors["primary"],
+                fg=self.colors["error"],
+                wraplength=600
+            )
+            warning_label.pack(pady=(0, 20))
+
+            desc_text = (
+                "This application allows you to control your PowerPoint presentations\n"
+                "using body gestures without any additional hardware.\n\n"
+                "Please select your presentation mode:"
+            )
+
+            desc_label = tk.Label(
+                welcome_frame,
+                text=desc_text,
+                font=("Helvetica", 12),
+                bg=self.colors["primary"],
+                fg=self.colors["text"],
+                justify=tk.LEFT
+            )
+            desc_label.pack(pady=20)
+
+            # Mode selection buttons frame
+            mode_frame = tk.Frame(welcome_frame, bg=self.colors["primary"])
+            mode_frame.pack(pady=20)
+
+            # Nearby Mode Button - COMMENTED OUT
+            # nearby_btn = ttk.Button(
+            #     mode_frame,
+            #     text="Nearby Mode",
+            #     command=lambda: [self.set_nearby_mode(), self.show_main_app()],
+            #     style="Accent.TButton",
+            #     width=15
+            # )
+            # nearby_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+            # President Mode Button (NEW)
+            president_btn = ttk.Button(
+                mode_frame,
+                text="President Mode",
+                command=lambda: [self.set_president_mode(), self.show_main_app()],
+                style="Accent.TButton",
+                width=15
+            )
+            president_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+            # Conference Mode Button
+            conference_btn = ttk.Button(
+                mode_frame,
+                text="Conference Mode",
+                command=lambda: [self.set_conference_mode(), self.show_main_app()],
+                style="Accent.TButton",
+                width=15
+            )
+            conference_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+            # Mode descriptions
+            desc_frame = tk.Frame(welcome_frame, bg=self.colors["primary"])
+            desc_frame.pack(pady=(0, 20))
+
+            tk.Label(
+                desc_frame,
+                text="• Nearby Mode: For close-range control \n"
+                     "• Conference Mode: For long-range control ",
+                font=("Helvetica", 10),
+                bg=self.colors["primary"],
+                fg=self.colors["text"],
+                justify=tk.LEFT
+            ).pack()
+
+            # Start button (optional - you can remove if you want immediate transition after mode selection)
+            start_btn = ttk.Button(
+                welcome_frame,
+                text="Start Presentation",
+                command=self.show_main_app,
+                style="Accent.TButton"
+            )
+            start_btn.pack(pady=30)
+            return
+        else:
+            # Only apply basic preferences that are safe to apply at this stage
+            self.apply_basic_preferences()
+            # Add a small delay to show the welcome screen briefly
+            title_label = tk.Label(
+                welcome_frame,
+                text="Welcome to PWCV",
+                font=("Helvetica", 24, "bold"),
+                bg=self.colors["primary"],
+                fg=self.colors["text"]
+            )
+            title_label.pack(pady=(40, 10))
+
+            warning_label = tk.Label(
+                welcome_frame,
+                text="IMPORTANT: For full functionality, the camera must be directly facing the presenter with no obstacles in between.",
+                font=("Helvetica", 11, "bold"),
+                bg=self.colors["primary"],
+                fg=self.colors["error"],
+                wraplength=600
+            )
+            warning_label.pack(pady=(0, 20))
+
+            desc_text = (
+                "This application allows you to control your PowerPoint presentations\n"
+                "using body gestures without any additional hardware.\n\n"
+                "Please select your presentation mode:"
+            )
+
+            desc_label = tk.Label(
+                welcome_frame,
+                text=desc_text,
+                font=("Helvetica", 12),
+                bg=self.colors["primary"],
+                fg=self.colors["text"],
+                justify=tk.LEFT
+            )
+            desc_label.pack(pady=20)
+
+            # Mode selection buttons frame
+            mode_frame = tk.Frame(welcome_frame, bg=self.colors["primary"])
+            mode_frame.pack(pady=20)
+
+            # Nearby Mode Button
+            nearby_btn = ttk.Button(
+                mode_frame,
+                text="Nearby Mode",
+                command=lambda: [self.set_nearby_mode(), self.show_main_app()],
+                style="Accent.TButton",
+                width=15
+            )
+            nearby_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+            # Conference Mode Button
+            conference_btn = ttk.Button(
+                mode_frame,
+                text="Conference Mode",
+                command=lambda: [self.set_conference_mode(), self.show_main_app()],
+                style="Accent.TButton",
+                width=15
+            )
+            conference_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+            # Mode descriptions
+            desc_frame = tk.Frame(welcome_frame, bg=self.colors["primary"])
+            desc_frame.pack(pady=(0, 20))
+
+            tk.Label(
+                desc_frame,
+                text="• Nearby Mode: For close-range control \n"
+                     "• Conference Mode: For long-range control ",
+                font=("Helvetica", 10),
+                bg=self.colors["primary"],
+                fg=self.colors["text"],
+                justify=tk.LEFT
+            ).pack()
+
+            # Start button (optional - you can remove if you want immediate transition after mode selection)
+            start_btn = ttk.Button(
+                welcome_frame,
+                text="Start Presentation",
+                command=self.show_main_app,
+                style="Accent.TButton"
+            )
+            start_btn.pack(pady=30)
+            return
+
+    def create_main_app(self):
+        self.clear_frame()
+
+        # Initialize status_var before using it
+        self.status_var = tk.StringVar()
+        self.status_var.set("Ready to start control")  # Set initial status
+
+        main_frame = tk.Frame(self.root, bg=self.colors["primary"])
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        left_panel = tk.Frame(main_frame, bg=self.colors["secondary"])
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.video_label = tk.Label(left_panel, bg="black")
+        self.video_label.pack(pady=10)
+
+        btn_frame = tk.Frame(left_panel, bg=self.colors["secondary"])
+        btn_frame.pack(pady=10)
+
+        self.start_btn = ttk.Button(
+            btn_frame,
+            text="Start Control",
+            command=self.start_control,
+            style="Accent.TButton"
+        )
+        self.start_btn.pack(side=tk.LEFT, padx=5)
+
+        self.stop_btn = ttk.Button(
+            btn_frame,
+            text="Stop Control",
+            command=self.stop_control,
+            state=tk.DISABLED
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
+
+        right_panel = tk.Frame(main_frame, bg=self.colors["light"])
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        status_title = tk.Label(
+            right_panel,
+            text="Control Status",
+            font=("Helvetica", 14, "bold"),
+            bg=self.colors["light"],
+            fg=self.colors["text"]
+        )
+        status_title.pack(pady=(10, 5))
+
+        self.status_var = tk.StringVar()
+        self.set_status("Ready to start control")
+
+        self.status_label = tk.Label(
+            right_panel,
+            textvariable=self.status_var,
+            font=("Helvetica", 12),
+            bg=self.colors["light"],
+            fg=self.colors["text"],
+            wraplength=300,
+            justify=tk.LEFT
+        )
+        self.status_label.pack(pady=5, padx=10)
+
+        self.posture_status_var = tk.StringVar()
+        self.posture_status_var.set("Posture: Not detected")
+
+        self.posture_status = tk.Label(
+            right_panel,
+            textvariable=self.posture_status_var,
+            font=("Helvetica", 12),
+            bg=self.colors["light"],
+            fg=self.colors["text"]
+        )
+        self.posture_status.pack(pady=5)
+
+        # Set UI elements with preference values
+        if hasattr(self, 'delay_slider'):
+            self.delay_slider.set(self.slide_delay)
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.set(self.base_zoom_factor)
+        if hasattr(self, 'speed_slider'):
+            self.speed_slider.set(self.pointer_speed_multiplier)
+        if hasattr(self, 'dynamic_zoom_var'):
+            self.dynamic_zoom_var.set(self.dynamic_zoom)
+        if hasattr(self, 'posture_validation_var'):
+            self.posture_validation_var.set(self.validate_posture)
+        if hasattr(self, 'toggle_mode_nearby_var'):
+            self.toggle_mode_nearby_var.set(self.enable_toggle_mode_nearby)
+        if hasattr(self, 'toggle_mode_conference_var'):
+            self.toggle_mode_conference_var.set(self.enable_toggle_mode_conference)
+        if hasattr(self, 'camera_mode_var'):
+            self.camera_mode_var.set(self.preferences.get('camera_mode', 'normal'))
+        if hasattr(self, 'pose_estimation_var'):
+            self.pose_estimation_var.set(self.enable_pose_estimation)
+        if hasattr(self, 'furniture_detection_var'):
+            self.furniture_detection_var.set(self.enable_furniture_detection)
+        if hasattr(self, 'teacher_mode_var'):
+            self.teacher_mode_var.set(self.teacher_mode_active)
+        if hasattr(self, 'voice_control_var'):
+            self.voice_control_var.set(self.enable_voice_control)
+        if hasattr(self, 'voice_lang_var'):
+            self.voice_lang_var.set(self.preferences.get('voice_language', 'en'))
+
+    # ======================
+    # SETTINGS FUNCTIONS
+    # ======================
+
+    def create_settings(self):
+        self.clear_frame()
+        self.current_screen_method = self.create_settings
+
+        # Main container
+        main_frame = tk.Frame(self.root, bg=self.colors.get("primary", "#FFFFFF"))
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Title
+        title_label = tk.Label(
+            main_frame,
+            text="Settings",
+            font=("Helvetica", 20, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        title_label.pack(pady=(0, 10))
+
+        # Create notebook
+        notebook = ttk.Notebook(main_frame)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # ========== TAB 1: GENERAL ==========
+        tab_general = ttk.Frame(notebook)
+        notebook.add(tab_general, text="General")
+
+        # Mode presets
+        mode_frame = tk.LabelFrame(
+            tab_general,
+            text="Mode Presets",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        mode_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        self.mode_var = tk.StringVar(value=getattr(self, "mode", "custom"))
+        btn_frame = tk.Frame(mode_frame, bg=self.colors.get("primary", "#FFFFFF"))
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Radiobutton(btn_frame, text="Nearby Mode", variable=self.mode_var,
+                        value="nearby", command=self.set_nearby_mode).pack(side=tk.LEFT, padx=5, expand=True)
+        ttk.Radiobutton(btn_frame, text="Conference Mode", variable=self.mode_var,
+                        value="conference", command=self.set_conference_mode).pack(side=tk.LEFT, padx=5, expand=True)
+        ttk.Radiobutton(btn_frame, text="Custom", variable=self.mode_var,
+                        value="custom", command=self.set_custom_mode).pack(side=tk.LEFT, padx=5, expand=True)
+        # ===== NEW BUTTON =====
+        ttk.Radiobutton(btn_frame, text="President Mode", variable=self.mode_var,
+                        value="president", command=self.set_president_mode).pack(side=tk.LEFT, padx=5, expand=True)
+
+        # Theme selection
+        theme_frame = tk.LabelFrame(
+            tab_general,
+            text="Appearance",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        theme_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(theme_frame, text="Theme:", font=("Helvetica", 11),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=10)
+        self.theme_var = tk.StringVar(value=self.current_theme)
+        theme_menu = ttk.Combobox(theme_frame, textvariable=self.theme_var,
+                                  values=list(THEMES.keys()), state="readonly", width=15)
+        theme_menu.pack(side=tk.LEFT, padx=5)
+        theme_menu.bind("<<ComboboxSelected>>", self.change_theme)
+
+        # ========== TAB 2: SLIDE CONTROL ==========
+        tab_slide = ttk.Frame(notebook)
+        notebook.add(tab_slide, text="Slide Control")
+
+        # Slide delay
+        delay_frame = tk.LabelFrame(
+            tab_slide,
+            text="Slide Delay",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        delay_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(delay_frame, text="Delay (seconds):", font=("Helvetica", 11),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=10)
+        self.delay_slider = tk.Scale(delay_frame, from_=0.5, to=3.0, resolution=0.1,
+                                     orient=tk.HORIZONTAL, command=self.update_slide_delay,
+                                     bg=self.colors.get("primary", "#FFFFFF"),
+                                     fg=self.colors.get("text", "#000000"),
+                                     highlightbackground=self.colors.get("primary", "#FFFFFF"),
+                                     length=200)
+        self.delay_slider.set(self.slide_delay)
+        self.delay_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Zoom settings
+        zoom_frame = tk.LabelFrame(
+            tab_slide,
+            text="Zoom",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        zoom_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(zoom_frame, text="Base Zoom Level:", font=("Helvetica", 11),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=10)
+        self.zoom_slider = tk.Scale(zoom_frame, from_=1.0, to=10.0, resolution=0.1,
+                                    orient=tk.HORIZONTAL, command=self.update_zoom_level,
+                                    bg=self.colors.get("primary", "#FFFFFF"),
+                                    fg=self.colors.get("text", "#000000"),
+                                    highlightbackground=self.colors.get("primary", "#FFFFFF"),
+                                    length=200)
+        self.zoom_slider.set(self.base_zoom_factor)
+        self.zoom_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.dynamic_zoom_var = tk.BooleanVar(value=self.dynamic_zoom)
+        tk.Checkbutton(zoom_frame, text="Dynamic Zoom", variable=self.dynamic_zoom_var,
+                       command=self.toggle_dynamic_zoom,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=5)
+
+        # Posture validation
+        self.posture_validation_var = tk.BooleanVar(value=self.validate_posture)
+        tk.Checkbutton(tab_slide, text="Enable Posture Validation", variable=self.posture_validation_var,
+                       command=self.toggle_posture_validation,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=5)
+
+        # ========== TAB 3: POINTER MODE ==========
+        tab_pointer = ttk.Frame(notebook)
+        notebook.add(tab_pointer, text="Pointer Mode")
+
+        # Pointer speed
+        speed_frame = tk.LabelFrame(
+            tab_pointer,
+            text="Pointer Speed",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        speed_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(speed_frame, text="Speed Multiplier:", font=("Helvetica", 11),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=10)
+        self.speed_slider = tk.Scale(speed_frame, from_=1.0, to=10.0, resolution=0.1,
+                                     orient=tk.HORIZONTAL, command=self.update_pointer_speed,
+                                     bg=self.colors.get("primary", "#FFFFFF"),
+                                     fg=self.colors.get("text", "#000000"),
+                                     highlightbackground=self.colors.get("primary", "#FFFFFF"),
+                                     length=200)
+        self.speed_slider.set(self.pointer_speed_multiplier)
+        self.speed_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Toggle mode switches (these affect how pointer mode is entered)
+        self.toggle_mode_nearby_var = tk.BooleanVar(value=self.enable_toggle_mode_nearby)
+        tk.Checkbutton(tab_pointer, text="Enable Nearby Toggle Mode (two‑fingers)",
+                       variable=self.toggle_mode_nearby_var,
+                       command=self.toggle_mode_nearby_switch,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=2)
+
+        self.toggle_mode_conference_var = tk.BooleanVar(value=self.enable_toggle_mode_conference)
+        tk.Checkbutton(tab_pointer, text="Enable Conference Toggle Mode (hand distance)",
+                       variable=self.toggle_mode_conference_var,
+                       command=self.toggle_mode_conference_switch,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=2)
+
+        # ========== TAB 4: VOICE ==========
+        tab_voice = ttk.Frame(notebook)
+        notebook.add(tab_voice, text="Voice")
+
+        self.voice_control_var = tk.BooleanVar(value=self.enable_voice_control)
+        tk.Checkbutton(tab_voice, text="Enable Voice Control", variable=self.voice_control_var,
+                       command=self.toggle_voice_control,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=5)
+
+        lang_frame = tk.Frame(tab_voice, bg=self.colors.get("primary", "#FFFFFF"))
+        lang_frame.pack(fill=tk.X, pady=5, padx=5)
+        tk.Label(lang_frame, text="Language:", font=("Helvetica", 11),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=10)
+        self.voice_lang_var = tk.StringVar(value=self.preferences.get('voice_language', 'en'))
+        lang_menu = ttk.Combobox(lang_frame, textvariable=self.voice_lang_var,
+                                 values=["en"], state="readonly", width=10)
+        lang_menu.pack(side=tk.LEFT, padx=5)
+        lang_menu.bind("<<ComboboxSelected>>", self.change_voice_language)
+
+        ttk.Button(tab_voice, text="Test Voice Recognition",
+                   command=self.test_voice_recognition).pack(pady=5, padx=10)
+
+        # ========== TAB 5: CLICK ACTIVATION (EYE CONTROL ONLY) ==========
+        tab_click = ttk.Frame(notebook)
+        notebook.add(tab_click, text="Click Activation")
+
+        # Eye control
+        eye_frame = tk.LabelFrame(
+            tab_click,
+            text="Eye Control",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        eye_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        self.eye_control_var = tk.BooleanVar(value=self.eye_control_enabled)
+        tk.Checkbutton(eye_frame, text="Enable Eye Control", variable=self.eye_control_var,
+                       command=self.toggle_eye_control,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=2)
+
+        hold_frame = tk.Frame(eye_frame, bg=self.colors.get("primary", "#FFFFFF"))
+        hold_frame.pack(fill=tk.X, padx=20, pady=2)
+        tk.Label(hold_frame, text="Hold time (s):", font=("Helvetica", 10),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=5)
+        self.hold_slider = tk.Scale(hold_frame, from_=0.1, to=2.0, resolution=0.05,
+                                    orient=tk.HORIZONTAL, command=self.update_hold_time,
+                                    bg=self.colors.get("primary", "#FFFFFF"),
+                                    fg=self.colors.get("text", "#000000"),
+                                    highlightbackground=self.colors.get("primary", "#FFFFFF"),
+                                    length=150)
+        self.hold_slider.set(self.hold_time)
+        self.hold_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        cooldown_frame = tk.Frame(eye_frame, bg=self.colors.get("primary", "#FFFFFF"))
+        cooldown_frame.pack(fill=tk.X, padx=20, pady=2)
+        tk.Label(cooldown_frame, text="Cooldown (s):", font=("Helvetica", 10),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=5)
+        self.cooldown_slider = tk.Scale(cooldown_frame, from_=0.5, to=5.0, resolution=0.1,
+                                        orient=tk.HORIZONTAL, command=self.update_click_cooldown,
+                                        bg=self.colors.get("primary", "#FFFFFF"),
+                                        fg=self.colors.get("text", "#000000"),
+                                        highlightbackground=self.colors.get("primary", "#FFFFFF"),
+                                        length=150)
+        self.cooldown_slider.set(self.click_cooldown)
+        self.cooldown_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Button(eye_frame, text="Calibrate Eye Threshold",
+                   command=self.start_eye_calibration).pack(pady=5, padx=20, anchor=tk.W)
+
+        # ========== TAB 6: CAMERA ==========
+        tab_camera = ttk.Frame(notebook)
+        notebook.add(tab_camera, text="Camera")
+
+        # Camera selection
+        cam_select_frame = tk.LabelFrame(
+            tab_camera,
+            text="Camera Selection",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        cam_select_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(cam_select_frame, text="Camera:", font=("Helvetica", 11),
+                 bg=self.colors.get("primary", "#FFFFFF"),
+                 fg=self.colors.get("text", "#000000")).pack(side=tk.LEFT, padx=10)
+        self.camera_combo = ttk.Combobox(cam_select_frame,
+                                         values=[name for idx, name in self.available_cameras],
+                                         state="readonly", width=40)
+        self.camera_combo.pack(side=tk.LEFT, padx=5)
+        if self.available_cameras:
+            current_name = next((name for idx, name in self.available_cameras if idx == self.selected_camera_index),
+                                self.available_cameras[0][1])
+            self.camera_combo.set(current_name)
+
+        ttk.Button(cam_select_frame, text="Refresh", command=self.refresh_camera_list).pack(side=tk.LEFT, padx=5)
+        ttk.Button(cam_select_frame, text="Apply", command=self.apply_camera_selection).pack(side=tk.LEFT, padx=5)
+
+        # Camera mode
+        cam_mode_frame = tk.LabelFrame(
+            tab_camera,
+            text="Camera Mode",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000")
+        )
+        cam_mode_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        self.camera_mode_var = tk.StringVar(value=self.preferences.get('camera_mode', 'normal'))
+        ttk.Radiobutton(cam_mode_frame, text="Normal Mode", variable=self.camera_mode_var,
+                        value="normal", command=self.set_camera_normal_mode).pack(side=tk.LEFT, padx=10, expand=True)
+        ttk.Radiobutton(cam_mode_frame, text="High Mode", variable=self.camera_mode_var,
+                        value="high", command=self.set_camera_high_mode).pack(side=tk.LEFT, padx=10, expand=True)
+
+        # ========== TAB 7: ADVANCED ==========
+        tab_advanced = ttk.Frame(notebook)
+        notebook.add(tab_advanced, text="Advanced")
+
+        # Pose estimation
+        self.pose_estimation_var = tk.BooleanVar(value=self.enable_pose_estimation)
+        tk.Checkbutton(tab_advanced, text="Enable Pose Estimation (Standing/Sitting)",
+                       variable=self.pose_estimation_var,
+                       command=self.toggle_pose_estimation,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=5)
+
+        # Furniture detection
+        self.furniture_detection_var = tk.BooleanVar(value=self.enable_furniture_detection)
+        tk.Checkbutton(tab_advanced, text="Enable Furniture Detection (Classroom Mode)",
+                       variable=self.furniture_detection_var,
+                       command=self.toggle_furniture_detection,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=5)
+
+        # Teacher mode
+        self.teacher_mode_var = tk.BooleanVar(value=self.teacher_mode_active)
+        tk.Checkbutton(tab_advanced, text="Teacher Mode (disable control if sitting or near furniture)",
+                       variable=self.teacher_mode_var,
+                       command=self.toggle_teacher_mode,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=5)
+
+        # Laser pointer hotkey toggle
+        self.laser_hotkey_var = tk.BooleanVar(value=self.use_laser_hotkey)
+        tk.Checkbutton(tab_pointer, text="Send Ctrl+L (PowerPoint Laser Pointer) when toggling pointer mode",
+                       variable=self.laser_hotkey_var,
+                       command=self.toggle_laser_hotkey,
+                       font=("Helvetica", 11),
+                       bg=self.colors.get("primary", "#FFFFFF"),
+                       fg=self.colors.get("text", "#000000"),
+                       selectcolor=self.colors.get("secondary", "#DDDDDD")).pack(anchor=tk.W, padx=10, pady=2)
+
+        # --- President Mode ---
+        self.president_mode_var = tk.BooleanVar(value=self.president_mode)
+        self.president_cb = tk.Checkbutton(
+            tab_slide,
+            text="Enable President Mode (open palm facing camera)",
+            variable=self.president_mode_var,
+            command=self.toggle_president_mode,
+            font=("Helvetica", 11),
+            bg=self.colors.get("primary", "#FFFFFF"),
+            fg=self.colors.get("text", "#000000"),
+            selectcolor=self.colors.get("secondary", "#DDDDDD")
+        )
+        self.president_cb.pack(anchor=tk.W, padx=10, pady=5)
+
+        # ========== BACK BUTTON ==========
+        back_frame = tk.Frame(main_frame, bg=self.colors.get("primary", "#FFFFFF"))
+        back_frame.pack(fill=tk.X, pady=10)
+        back_btn = ttk.Button(back_frame, text="Back to Main", command=self.show_main_app)
+        back_btn.pack()
+
+        # Update all sliders to current values (ensures consistency after mode changes)
+        self._update_settings_ui()
+
+    def create_theme_settings(self, parent_frame):
+        # Theme selection
+        theme_frame = tk.LabelFrame(
+            parent_frame,
+            text="Appearance",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        )
+        theme_frame.pack(fill=tk.X, pady=10, padx=5)
+
+        tk.Label(
+            theme_frame,
+            text="Application Theme:",
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        ).pack(side=tk.LEFT, padx=10)
+
+        self.theme_var = tk.StringVar(value=self.current_theme)
+        theme_menu = ttk.Combobox(
+            theme_frame,
+            textvariable=self.theme_var,
+            values=list(THEMES.keys()),
+            state="readonly",
+            width=15
+        )
+        theme_menu.pack(side=tk.LEFT, padx=5)
+        theme_menu.bind("<<ComboboxSelected>>", self.change_theme)
+
+    def create_mode_settings(self, parent_frame):
+        # Mode selection
+        mode_frame = tk.LabelFrame(
+            parent_frame,
+            text="Presentation Mode Presets",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        )
+        mode_frame.pack(fill=tk.X, pady=10, padx=5)
+
+        self.mode_var = tk.StringVar(value="custom")
+
+        mode_btn_frame = tk.Frame(mode_frame, bg=self.colors["primary"])
+        mode_btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        nearby_btn = ttk.Radiobutton(
+            mode_btn_frame,
+            text="Nearby Mode",
+            variable=self.mode_var,
+            value="nearby",
+            command=self.set_nearby_mode,
+            style="Toolbutton"
+        )
+        nearby_btn.pack(side=tk.LEFT, padx=5, expand=True)
+
+        conference_btn = ttk.Radiobutton(
+            mode_btn_frame,
+            text="Conference Mode",
+            variable=self.mode_var,
+            value="conference",
+            command=self.set_conference_mode,
+            style="Toolbutton"
+        )
+        conference_btn.pack(side=tk.LEFT, padx=5, expand=True)
+
+        custom_btn = ttk.Radiobutton(
+            mode_btn_frame,
+            text="Custom Settings",
+            variable=self.mode_var,
+            value="custom",
+            command=self.set_custom_mode,
+            style="Toolbutton"
+        )
+        custom_btn.pack(side=tk.LEFT, padx=5, expand=True)
+
+        desc_frame = tk.Frame(mode_frame, bg=self.colors["primary"])
+        desc_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        tk.Label(
+            desc_frame,
+            text="• Nearby: For small rooms with close distance\n• Conference: For large rooms with far distance",
+            font=("Helvetica", 9),
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            justify=tk.LEFT
+        ).pack(side=tk.LEFT)
+
+    def create_control_settings(self, parent_frame):
+        # Control settings
+        control_frame = tk.LabelFrame(
+            parent_frame,
+            text="Slide Control Settings",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        )
+        control_frame.pack(fill=tk.X, pady=10, padx=5)
+
+        # Slide delay
+        delay_frame = tk.Frame(control_frame, bg=self.colors["primary"])
+        delay_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(
+            delay_frame,
+            text="Slide Delay (seconds):",
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        ).pack(side=tk.LEFT, padx=10)
+
+        self.delay_slider = tk.Scale(
+            delay_frame,
+            from_=0.5,
+            to=3.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            command=self.update_slide_delay,
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            highlightbackground=self.colors["primary"],
+            length=200
+        )
+        self.delay_slider.set(self.slide_delay)
+        self.delay_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def create_pointer_settings(self, parent_frame):
+        # Pointer settings
+        pointer_frame = tk.LabelFrame(
+            parent_frame,
+            text="Pointer Mode Settings",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        )
+        pointer_frame.pack(fill=tk.X, pady=10, padx=5)
+
+        # Pointer speed control
+        speed_frame = tk.Frame(pointer_frame, bg=self.colors["primary"])
+        speed_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(
+            speed_frame,
+            text="Pointer Speed Multiplier:",
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        ).pack(side=tk.LEFT, padx=10)
+
+        self.speed_slider = tk.Scale(
+            speed_frame,
+            from_=1.0,
+            to=10.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            command=self.update_pointer_speed,
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            highlightbackground=self.colors["primary"],
+            length=200
+        )
+        self.speed_slider.set(self.pointer_speed_multiplier)
+        self.speed_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Warning for pointer speed
+        warning_frame = tk.Frame(pointer_frame, bg=self.colors["primary"])
+        warning_frame.pack(fill=tk.X, pady=(0, 5), padx=5)
+
+        warning_label = tk.Label(
+            warning_frame,
+            text="Note: Speeds above 7 may cause unstable behavior at far distances",
+            font=("Helvetica", 9),
+            bg=self.colors["primary"],
+            fg=self.colors["warning"],
+            justify=tk.LEFT
+        )
+        warning_label.pack(side=tk.LEFT, padx=10)
+
+        self.pinch_click_var = tk.BooleanVar(value=self.pinch_click_enabled)
+        tk.Checkbutton(
+            pointer_frame,
+            text="Enable pinch click (index + thumb) – Nearby mode only",
+            variable=self.pinch_click_var,
+            command=self.toggle_pinch_click,
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            selectcolor=self.colors["secondary"]
+        ).pack(anchor=tk.W, padx=10, pady=2)
+
+        # Pinch click toggle (Nearby mode only)
+        self.pinch_click_var = tk.BooleanVar(value=self.pinch_click_enabled)
+        tk.Checkbutton(
+            pointer_frame,
+            text="Enable pinch click (index + thumb) – Nearby mode only",
+            variable=self.pinch_click_var,
+            command=self.toggle_pinch_click,
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            selectcolor=self.colors["secondary"]
+        ).pack(anchor=tk.W, padx=10, pady=2)
+
+    def create_posture_settings(self, parent_frame):
+        # Posture and zoom settings
+        posture_frame = tk.LabelFrame(
+            parent_frame,
+            text="Posture & Zoom Settings",
+            font=("Helvetica", 12, "bold"),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        )
+        posture_frame.pack(fill=tk.X, pady=10, padx=5)
+
+        # Zoom controls
+        zoom_frame = tk.Frame(posture_frame, bg=self.colors["primary"])
+        zoom_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        tk.Label(
+            zoom_frame,
+            text="Base Zoom Level:",
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        ).pack(side=tk.LEFT, padx=10)
+
+        self.zoom_slider = tk.Scale(
+            zoom_frame,
+            from_=1.0,
+            to=10.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            command=self.update_zoom_level,
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            highlightbackground=self.colors["primary"],
+            length=200
+        )
+        self.zoom_slider.set(self.base_zoom_factor)
+        self.zoom_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Dynamic zoom checkbox
+        self.dynamic_zoom_var = tk.BooleanVar(value=self.dynamic_zoom)
+
+        dynamic_zoom_frame = tk.Frame(posture_frame, bg=self.colors["primary"])
+        dynamic_zoom_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        self.dynamic_zoom_cb = tk.Checkbutton(
+            dynamic_zoom_frame,
+            text="Enable Dynamic Zoom (auto-adjust based on distance)",
+            variable=self.dynamic_zoom_var,
+            command=self.toggle_dynamic_zoom,
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            selectcolor=self.colors["secondary"]
+        )
+        self.dynamic_zoom_cb.pack(side=tk.LEFT, padx=10)
+
+        # Posture validation checkbox
+        self.posture_validation_var = tk.BooleanVar(value=self.validate_posture)
+
+        posture_validation_frame = tk.Frame(posture_frame, bg=self.colors["primary"])
+        posture_validation_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        self.posture_cb = tk.Checkbutton(
+            posture_validation_frame,
+            text="Enable Standing Posture Validation",
+            variable=self.posture_validation_var,
+            command=self.toggle_posture_validation,
+            font=("Helvetica", 11),
+            bg=self.colors["primary"],
+            fg=self.colors["text"],
+            selectcolor=self.colors["secondary"]
+        )
+        self.posture_cb.pack(side=tk.LEFT, padx=10)
+
+    def create_about(self):
+        self.clear_frame()
+
+        about_frame = tk.Frame(self.root, bg=self.colors["primary"])
+        about_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        title_label = tk.Label(
+            about_frame,
+            text="About Gesture-Controlled Presentation",
+            font=("Helvetica", 20, "bold"),
+            bg=self.colors["primary"],
+            fg=self.colors["text"]
+        )
+        title_label.pack(pady=(10, 20))
+
+        desc_frame = tk.Frame(about_frame, bg=self.colors["light"])
+        desc_frame.pack(fill=tk.X, pady=10, padx=20)
+
+        desc_text = (
+            "This application allows you to control your PowerPoint presentations\n"
+            "using body gestures without any additional hardware.\n\n"
+            "This application was developed to provide a hands-free presentation experience, "
+            "making it ideal for situations where you need to interact with your audience "
+            "while maintaining full control of your slides."
+        )
+
+        desc_label = tk.Label(
+            desc_frame,
+            text=desc_text,
+            font=("Helvetica", 11),
+            bg=self.colors["light"],
+            fg=self.colors["text"],
+            wraplength=600,
+            justify=tk.LEFT
+        )
+        desc_label.pack(pady=10, padx=10)
+
+        dev_frame = tk.Frame(about_frame, bg=self.colors["light"])
+        dev_frame.pack(fill=tk.X, pady=10, padx=20)
+
+        dev_label = tk.Label(
+            dev_frame,
+            text="Developed by Yassir Tagemouati",
+            font=("Helvetica", 11, "bold"),
+            bg=self.colors["light"],
+            fg=self.colors["text"]
+        )
+        dev_label.pack(pady=5)
+
+        social_frame = tk.Frame(about_frame, bg=self.colors["light"])
+        social_frame.pack(fill=tk.X, pady=10, padx=20)
+
+        linkedin_btn = ttk.Button(
+            social_frame,
+            text="LinkedIn",
+            command=lambda: webbrowser.open("https://www.linkedin.com/in/yassir-tagemouati-471a6a2a2/"),
+            style="Social.TButton"
+        )
+        linkedin_btn.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+
+        instagram_btn = ttk.Button(
+            social_frame,
+            text="Instagram",
+            command=lambda: webbrowser.open("https://www.instagram.com/yassir_tage/"),
+            style="Social.TButton"
+        )
+        instagram_btn.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+
+        github_btn = ttk.Button(
+            social_frame,
+            text="Github",
+            command=lambda: webbrowser.open("https://github.com/TageYassir"),
+            style="Social.TButton"
+        )
+        github_btn.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+
+        support_frame = tk.Frame(about_frame, bg=self.colors["light"])
+        support_frame.pack(fill=tk.X, pady=10, padx=20)
+
+        paypal_btn = ttk.Button(
+            support_frame,
+            text="Support via PayPal",
+            command=lambda: webbrowser.open("https://paypal.me/YassirTagemouati?country.x=MA&locale.x=fr_XC"),
+            style="Accent.TButton"
+        )
+        paypal_btn.pack(pady=10, fill=tk.X)
+
+        email_frame = tk.Frame(support_frame, bg=self.colors["light"])
+        email_frame.pack(fill=tk.X, pady=5)
+
+        support_label = tk.Label(
+            email_frame,
+            text="Support: ",
+            font=("Helvetica", 11, "bold"),
+            bg=self.colors["light"],
+            fg=self.colors["text"]
+        )
+        support_label.pack(side=tk.LEFT)
+
+        email_link = tk.Label(
+            email_frame,
+            text="tagemouatiyassir@gmail.com",
+            font=("Helvetica", 11, "bold", "underline"),
+            bg=self.colors["light"],
+            fg="blue",
+            cursor="hand2"
+        )
+        email_link.pack(side=tk.LEFT)
+        email_link.bind("<Button-1>", lambda e: webbrowser.open("mailto:tagemouatiyassir@gmail.com"))
+
+        back_btn = ttk.Button(
+            about_frame,
+            text="Back to Main",
+            command=self.show_main_app
+        )
+        back_btn.pack(pady=10)
+
+    def create_camera_settings(self):
+        self.clear_frame()
+        self.current_screen_method = self.create_camera_settings
+
+        frame = tk.Frame(self.root, bg=self.colors["primary"])
+        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        tk.Label(frame, text="Camera Settings", font=("Helvetica", 20, "bold"),
+                 bg=self.colors["primary"], fg=self.colors["text"]).pack(pady=(10, 20))
+
+        # Refresh button
+        refresh_btn = ttk.Button(frame, text="Refresh Camera List",
+                                 command=self.refresh_camera_list)
+        refresh_btn.pack(pady=5)
+
+        # Selection area
+        select_frame = tk.Frame(frame, bg=self.colors["primary"])
+        select_frame.pack(pady=10)
+
+        tk.Label(select_frame, text="Select Camera:", font=self.colors["font"],
+                 bg=self.colors["primary"], fg=self.colors["text"]).pack(side=tk.LEFT, padx=5)
+
+        self.camera_combo = ttk.Combobox(select_frame,
+                                         values=[name for idx, name in self.available_cameras],
+                                         state="readonly", width=40)
+        self.camera_combo.pack(side=tk.LEFT, padx=5)
+        # Set current selection
+        if self.available_cameras:
+            current_name = next((name for idx, name in self.available_cameras if idx == self.selected_camera_index),
+                                self.available_cameras[0][1])
+            self.camera_combo.set(current_name)
+
+        # Apply button
+        apply_btn = ttk.Button(select_frame, text="Apply",
+                               command=self.apply_camera_selection)
+        apply_btn.pack(side=tk.LEFT, padx=5)
+
+        # Status label (for feedback)
+        self.settings_status_label = tk.Label(frame, text="", bg=self.colors["primary"], fg=self.colors["text"])
+        self.settings_status_label.pack(pady=5)
+
+        # Back button
+        back_btn = ttk.Button(frame, text="Back to Main",
+                              command=lambda: [self.clear_settings_status(), self.show_main_app()])
+        back_btn.pack(pady=20)
+
+        # Store reference to the status label for use in other methods
+        self.current_settings_status_label = self.settings_status_label
+
+    def clear_settings_status(self):
+        """Clear the settings status label and remove reference."""
+        if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+            self.current_settings_status_label.config(text="")
+            self.current_settings_status_label = None
+
+    def create_voice_settings(self):
+        self.clear_frame()
+        self.current_screen_method = self.create_voice_settings
+
+        frame = tk.Frame(self.root, bg=self.colors["primary"])
+        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        tk.Label(frame, text="Voice Settings", font=("Helvetica", 20, "bold"),
+                 bg=self.colors["primary"], fg=self.colors["text"]).pack(pady=(10, 20))
+
+        # Refresh button
+        refresh_btn = ttk.Button(frame, text="Refresh Microphone List",
+                                 command=self.refresh_microphone_list)
+        refresh_btn.pack(pady=5)
+
+        # Selection area
+        select_frame = tk.Frame(frame, bg=self.colors["primary"])
+        select_frame.pack(pady=10)
+
+        tk.Label(select_frame, text="Select Microphone:", font=self.colors["font"],
+                 bg=self.colors["primary"], fg=self.colors["text"]).pack(side=tk.LEFT, padx=5)
+
+        self.microphone_combo = ttk.Combobox(select_frame,
+                                             values=[name for idx, name in self.available_microphones],
+                                             state="readonly", width=50)
+        self.microphone_combo.pack(side=tk.LEFT, padx=5)
+
+        # Set current selection
+        if self.available_microphones and self.selected_microphone_index is not None:
+            for idx, name in self.available_microphones:
+                if idx == self.selected_microphone_index:
+                    self.microphone_combo.set(name)
+                    break
+
+        # Apply button
+        apply_btn = ttk.Button(select_frame, text="Apply",
+                               command=self.apply_microphone_selection)
+        apply_btn.pack(side=tk.LEFT, padx=5)
+
+        # Status label
+        self.settings_status_label = tk.Label(frame, text="", bg=self.colors["primary"], fg=self.colors["text"])
+        self.settings_status_label.pack(pady=5)
+
+        # Back button
+        back_btn = ttk.Button(frame, text="Back to Main",
+                              command=lambda: [self.clear_settings_status(), self.show_main_app()])
+        back_btn.pack(pady=20)
+
+        self.current_settings_status_label = self.settings_status_label
+
+    def change_theme(self, event=None):
+        theme_name = self.theme_var.get()
+        self.current_theme = theme_name
+        self.colors = THEMES[theme_name]
+
+        # Save to preferences
+        self.preferences.set('theme', theme_name)
+
+        # Reconfigure all styles
+        self.configure_styles()
+
+        # Only recreate the current screen if we're not applying preferences
+        if not hasattr(self, '_applying_preferences') or not self._applying_preferences:
+            # Determine current screen
+            if hasattr(self, 'current_screen_method'):
+                current_screen = self.current_screen_method
+                current_screen()
+
+        # Update status
+        self.set_status(f"Theme changed to {theme_name}")
+
+    ########################################################################
+    # VOICE CONTROL SECTION
+    ########################################################################
+
+    def toggle_voice_control(self):
+        self.enable_voice_control = self.voice_control_var.get()
+        self.preferences.set('enable_voice_control', self.enable_voice_control)
+
+        if self.enable_voice_control:
+            # Check if microphone is available before starting
+            try:
+                # Test microphone access
+                with sr.Microphone() as source:
+                    pass
+                self.start_voice_recognition()
+            except OSError as e:
+                messagebox.showerror("Microphone Error",
+                                     f"Cannot access microphone: {str(e)}\n\n"
+                                     "Please check:\n"
+                                     "1. Microphone is connected and working\n"
+                                     "2. Microphone permissions are granted to this application\n"
+                                     "3. No other application is using the microphone")
+                self.enable_voice_control = False
+                self.voice_control_var.set(False)
+            except Exception as e:
+                messagebox.showerror("Error", f"Error accessing microphone: {str(e)}")
+                self.enable_voice_control = False
+                self.voice_control_var.set(False)
+        else:
+            self.stop_voice_recognition()
+
+    def start_voice_recognition(self):
+        if self.voice_recognizer is None:
+            try:
+                self.voice_recognizer = AdaptiveVoiceRecognizer()
+                if not self.voice_recognizer.microphone_available:
+                    raise Exception("Microphone not available")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to initialize voice recognition: {str(e)}")
+                self.enable_voice_control = False
+                self.voice_control_var.set(False)
+                return
+
+        # Set language (if your recognizer supports it)
+        languages = [self.voice_lang_var.get()]
+        self.voice_recognizer.set_target_words(languages)
+
+        self.voice_stop_event.clear()
+        self.voice_listening_thread = threading.Thread(target=self.voice_listening_loop)
+        self.voice_listening_thread.daemon = True
+        self.voice_listening_thread.start()
+
+    def stop_voice_recognition(self):
+        self.voice_stop_event.set()
+        if self.voice_listening_thread and self.voice_listening_thread.is_alive():
+            self.voice_listening_thread.join(timeout=2.0)
+        print("Voice recognition stopped")
+
+    def voice_listening_loop(self):
+        """Continuously listen for voice commands using the selected microphone."""
+        time.sleep(0.5)
+
+        while not self.voice_stop_event.is_set() and self.enable_voice_control:
+            try:
+                if not self.voice_recognizer or not self.voice_recognizer.microphone_available:
+                    print("Microphone not available, stopping voice recognition")
+                    self.enable_voice_control = False
+                    self.voice_control_var.set(False)
+                    break
+
+                mic_kwargs = {}
+                if self.selected_microphone_index is not None:
+                    mic_kwargs['device_index'] = self.selected_microphone_index
+                    print(f"🎤 Using microphone device index: {self.selected_microphone_index}")
+                else:
+                    print("🎤 Using system default microphone")
+
+                with sr.Microphone(**mic_kwargs) as source:
+                    self.voice_recognizer.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio = self.voice_recognizer.recognizer.listen(
+                        source,
+                        timeout=1,
+                        phrase_time_limit=3
+                    )
+
+                recognized_text, detected_command, similarity = self.voice_recognizer.recognize_speech(audio)
+
+                print(f"Recognized: '{recognized_text}', Detected: '{detected_command}', Similarity: {similarity:.2f}")
+
+                if recognized_text:
+                    text_lower = recognized_text.lower()
+                    forward_indicators = ["forward", "ahead", "next", "skip forward", "go forward", "move forward"]
+                    backward_indicators = ["back", "backward", "previous", "go back", "move back", "skip back"]
+
+                    number = self.voice_recognizer.extract_slide_number(recognized_text)
+                    if number is None:
+                        number = 1
+
+                    is_forward = any(indicator in text_lower for indicator in forward_indicators)
+                    is_backward = any(indicator in text_lower for indicator in backward_indicators)
+
+                    if is_forward:
+                        print(f"Moving FORWARD by {number} slides")
+                        for _ in range(number):
+                            pyautogui.press('right')
+                            time.sleep(0.05)
+                    elif is_backward:
+                        print(f"Moving BACKWARD by {number} slides")
+                        for _ in range(number):
+                            pyautogui.press('left')
+                            time.sleep(0.2)
+                    elif detected_command:
+                        if detected_command == "next":
+                            pyautogui.press('right')
+                            print(f"Voice command: NEXT (similarity: {similarity:.2f})")
+                        elif detected_command == "previous":
+                            pyautogui.press('left')
+                            print(f"Voice command: PREVIOUS (similarity: {similarity:.2f})")
+                        elif detected_command == "first":
+                            pyautogui.hotkey('ctrl', 'shift', 'home')
+                            print(f"Voice command: FIRST (similarity: {similarity:.2f})")
+                        elif detected_command == "last":
+                            pyautogui.hotkey('ctrl', 'shift', 'end')
+                            print(f"Voice command: LAST (similarity: {similarity:.2f})")
+                        elif detected_command == "exit":
+                            pyautogui.press('esc')
+                            print(f"Voice command: EXIT (similarity: {similarity:.2f})")
+
+            except sr.WaitTimeoutError:
+                pass
+            except sr.UnknownValueError:
+                pass
+            except OSError as e:
+                if "Invalid error code" in str(e) or "Invalid number of channels" in str(e):
+                    error_msg = f"Microphone access error: {e}"
+                else:
+                    error_msg = f"Error in voice recognition: {e}"
+                print(error_msg)
+                self.set_status(error_msg)
+                self.enable_voice_control = False
+                self.voice_control_var.set(False)
+                break
+            except Exception as e:
+                print(f"Error in voice recognition: {e}")
+                time.sleep(1)
+
+    def change_voice_language(self, event=None):
+        language = self.voice_lang_var.get()
+        self.preferences.set('voice_language', language)
+
+        if self.enable_voice_control:
+            self.stop_voice_recognition()
+            self.start_voice_recognition()
+
+    def test_voice_recognition(self):
+        if not self.voice_recognizer:
+            messagebox.showinfo("Info", "Please enable voice control first.")
+            return
+
+        try:
+            with sr.Microphone() as source:
+                self.voice_recognizer.recognizer.adjust_for_ambient_noise(source)
+                messagebox.showinfo("Test", "Please say 'next' or 'previous' now...")
+                audio = self.voice_recognizer.recognizer.listen(source, timeout=3)
+
+            recognized_text = self.voice_recognizer.recognizer.recognize_google(
+                audio,
+                language=self.voice_recognizer.lang_codes.get(self.voice_lang_var.get(), "en-US")
+            ).lower()
+
+            messagebox.showinfo("Result", f"I heard: {recognized_text}")
+        except sr.UnknownValueError:
+            messagebox.showinfo("Result", "Could not understand audio")
+        except sr.WaitTimeoutError:
+            messagebox.showinfo("Result", "No speech detected")
+        except OSError as e:
+            if "Invalid error code" in str(e):
+                messagebox.showerror("Microphone Error",
+                                     "Cannot access microphone. Please check:\n"
+                                     "1. Microphone is connected\n"
+                                     "2. Microphone permissions are granted\n"
+                                     "3. No other application is using the microphone")
+            else:
+                messagebox.showerror("Error", f"Microphone error: {str(e)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error testing voice: {str(e)}")
+
+    ########################################################################
+    # PROCESSING FUNCTIONS (NORMAL AND HIGH MODE)
+    ########################################################################
+
+    def process_control_mode_high(self, frame):
+        try:
+            # Process voice commands if voice control is enabled
+            if self.enable_voice_control and not self.pointer_mode:
+                cv2.putText(frame, "VOICE CONTROL ACTIVE", (frame.shape[1] - 250, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = frame.shape
+
+            # --- Eye control: run face mesh if enabled ---
+            if self.eye_control_enabled:
+                face_results = self.face_mesh.process(rgb_frame)
+                if face_results.multi_face_landmarks:
+                    face_landmarks = face_results.multi_face_landmarks[0].landmark
+                    self.process_eye_closure(frame, face_landmarks, w, h)
+
+            # Hand detection for nearby toggle and pinch
+            hand_results = None
+            if self.enable_toggle_mode_nearby or self.president_mode:
+                hand_results = self.hands.process(rgb_frame)
+
+            # Detect furniture if enabled
+            chairs, tables = [], []
+            if self.enable_furniture_detection:
+                chairs, tables = self.detect_furniture(frame)
+                for chair in chairs:
+                    x1, y1, x2, y2 = map(int, chair)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                    cv2.putText(frame, "Chair", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                for table in tables:
+                    x1, y1, x2, y2 = map(int, table)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
+                    cv2.putText(frame, "Table", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+
+            # Process pose detection only if enabled
+            if self.enable_pose_estimation:
+                pose_results = self.pose.process(rgb_frame)
+                if pose_results.pose_landmarks:
+                    landmarks = pose_results.pose_landmarks.landmark
+
+                    is_sitting = False
+                    valid_posture = True
+                    near_furniture = False
+
+                    if self.enable_pose_estimation:
+                        is_sitting = self.determine_posture(landmarks) == "SITTING"
+
+                    if self.validate_posture:
+                        valid_posture = self.check_posture(landmarks, w, h)
+
+                    if self.enable_furniture_detection:
+                        near_furniture = self.is_person_near_furniture(landmarks, chairs, tables, w, h)
+
+                    # Teacher mode restrictions
+                    if self.teacher_mode_active and (is_sitting or near_furniture):
+                        if self.enable_pose_estimation or self.enable_furniture_detection:
+                            cv2.putText(frame, "STUDENT DETECTED - CONTROL DISABLED",
+                                        (w // 2 - 200, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            return frame
+
+                    # Posture validation
+                    if (self.validate_posture and not valid_posture) or (self.enable_pose_estimation and is_sitting):
+                        if self.validate_posture and not valid_posture:
+                            cv2.putText(frame, "INVALID POSTURE - STAND STRAIGHT",
+                                        (w // 2 - 200, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        if self.enable_pose_estimation and is_sitting:
+                            cv2.putText(frame, "SITTING DETECTED - STAND UP TO CONTROL",
+                                        (w // 2 - 250, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+                        if self.pointer_mode:
+                            self.pointer_mode = False
+                            if self.use_laser_hotkey:
+                                pyautogui.hotkey('ctrl', 'l')
+                        self.both_hands_up_start = 0
+                        self.pinch_active = False  # Reset pinch state
+                        return frame
+
+                    current_time = time.time()
+
+                    # Get key body points
+                    left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
+                    right_wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+                    left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+                    right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+                    left_eye = landmarks[self.mp_pose.PoseLandmark.LEFT_EYE]
+                    right_eye = landmarks[self.mp_pose.PoseLandmark.RIGHT_EYE]
+
+                    body_center_x = (left_shoulder.x + right_shoulder.x) / 2
+                    body_center_y = (left_shoulder.y + right_shoulder.y) / 2
+                    eye_level = (left_eye.y + right_eye.y) / 2
+
+                    # Distance calculation for conference mode
+                    pixel_distance = abs(left_wrist.x - right_wrist.x) * w
+                    cm_per_pixel = 40 / (0.2 * w)
+                    distance_cm = pixel_distance * cm_per_pixel
+
+                    # --- Toggle mode activation logic ---
+                    toggle_triggered = False
+                    hold_threshold = 3.0
+                    hands_conference = False
+                    max_hand_dist = 0.0
+
+                    # ======================
+                    # NEARBY MODE (two‑finger toggle + pinch click)
+                    # ======================
+                    if self.enable_toggle_mode_nearby and hand_results:
+                        # ----- Two‑finger raised (toggle pointer mode) -----
+                        two_fingers_raised = self.check_two_fingers_raised(hand_results)
+                        current_time = time.time()
+
+                        if two_fingers_raised:
+                            if self.two_fingers_gesture_start is None:
+                                self.two_fingers_gesture_start = current_time
+                            else:
+                                duration = current_time - self.two_fingers_gesture_start
+                                if duration < self.two_fingers_toggle_threshold:
+                                    remaining = int(self.two_fingers_toggle_threshold - duration) + 1
+                                    cv2.putText(frame, f"{remaining}", (w // 2, 120),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+                                    cv2.putText(frame, "HOLD FOR TOGGLE", (50, 120),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                                else:
+                                    # Toggle pointer mode
+                                    self.pointer_mode = not self.pointer_mode
+                                    self.two_fingers_gesture_start = None
+                                    if self.use_laser_hotkey:
+                                        pyautogui.hotkey('ctrl', 'l')
+                                    if self.pointer_mode:
+                                        screen_width, screen_height = pyautogui.size()
+                                        pyautogui.moveTo(screen_width // 2, screen_height // 2)
+                                        self.last_center_time = current_time
+                                    status_msg = "POINTER MODE ON" if self.pointer_mode else "SLIDE MODE ON"
+                                    cv2.putText(frame, status_msg, (w // 2 - 100, 60),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        else:
+                            if self.two_fingers_gesture_start is not None:
+                                self.two_fingers_gesture_start = None
+
+                        # ----- Pinch click (index + thumb) – only when pointer mode active -----
+                        if self.pointer_mode and self.pinch_click_enabled and hand_results.multi_hand_landmarks:
+                            hand_landmarks = hand_results.multi_hand_landmarks[0]
+                            pinch = self.check_index_thumb_pinch(hand_landmarks, w, h, self.pinch_threshold)
+
+                            if pinch and not self.pinch_active:
+                                self.pinch_active = True
+                            elif not pinch and self.pinch_active:
+                                if current_time - self.last_pinch_click_time > self.click_cooldown:
+                                    pyautogui.click()
+                                    self.last_pinch_click_time = current_time
+                                    cv2.putText(frame, "PINCH CLICK", (10, 390),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                self.pinch_active = False
+                        else:
+                            self.pinch_active = False
+
+                    # ======================
+                    # CONFERENCE MODE
+                    # ======================
+                    if self.enable_toggle_mode_conference:
+                        left_hand_dist = ((left_wrist.x - body_center_x) ** 2 + (
+                                    left_wrist.y - body_center_y) ** 2) ** 0.5
+                        right_hand_dist = ((right_wrist.x - body_center_x) ** 2 + (
+                                    right_wrist.y - body_center_y) ** 2) ** 0.5
+                        max_hand_dist = max(left_hand_dist, right_hand_dist)
+                        conference_threshold = 10 + 20 * max_hand_dist
+                        hands_conference = (distance_cm <= conference_threshold and
+                                            left_wrist.visibility > 0.7 and
+                                            right_wrist.visibility > 0.7)
+                        if hands_conference:
+                            toggle_triggered = True
+                            hold_threshold = self.both_hands_up_threshold
+
+                        # Draw distance feedback
+                        left_x = int(left_wrist.x * w)
+                        right_x = int(right_wrist.x * w)
+                        cv2.line(frame, (left_x, 100), (right_x, 100), (0, 255, 255), 2)
+                        color = (0, 255, 0) if hands_conference else (0, 0, 255)
+                        cv2.putText(frame, f"{distance_cm:.0f}cm", ((left_x + right_x) // 2, 90),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+                        if self.enable_toggle_mode_conference:
+                            cv2.putText(frame, f"Conf Thresh: {conference_threshold:.1f}cm", (w - 250, 30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                            cv2.putText(frame, f"Hand Dist: {max_hand_dist:.2f}", (w - 250, 60),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+                    # Conference mode toggle processing
+                    if toggle_triggered:
+                        if self.both_hands_up_start == 0:
+                            self.both_hands_up_start = current_time
+                            cv2.putText(frame, f"HOLD FOR {int(hold_threshold)}s TO TOGGLE POINTER", (50, 120),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                        else:
+                            if self.enable_toggle_mode_conference and hands_conference:
+                                dynamic_hold_time = max(1.0, self.both_hands_up_threshold * (1 - max_hand_dist * 2))
+                                remaining_time = dynamic_hold_time - (current_time - self.both_hands_up_start)
+                                hold_time_used = dynamic_hold_time
+                            else:
+                                hold_time_used = hold_threshold
+                                remaining_time = hold_time_used - (current_time - self.both_hands_up_start)
+
+                            if remaining_time > 0:
+                                remaining = int(remaining_time) + 1
+                                cv2.putText(frame, f"{remaining}", (w // 2, 120),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+
+                            if current_time - self.both_hands_up_start >= hold_time_used:
+                                self.pointer_mode = not self.pointer_mode
+                                self.both_hands_up_start = 0
+                                if self.use_laser_hotkey:
+                                    pyautogui.hotkey('ctrl', 'l')
+                                if self.pointer_mode:
+                                    screen_width, screen_height = pyautogui.size()
+                                    pyautogui.moveTo(screen_width // 2, screen_height // 2)
+                                    self.last_center_time = current_time
+                                status_msg = "POINTER MODE ON" if self.pointer_mode else "SLIDE MODE ON"
+                                cv2.putText(frame, status_msg, (w // 2 - 100, 60),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    else:
+                        self.both_hands_up_start = 0
+
+                    # ======================
+                    # POINTER MODE (Joystick)
+                    # ======================
+                    if self.pointer_mode:
+                        screen_width, screen_height = pyautogui.size()
+                        screen_center_x = screen_width // 2
+                        screen_center_y = screen_height // 2
+
+                        if self.enable_toggle_mode_conference:
+                            control_point_x = (left_wrist.x + right_wrist.x) / 2
+                            control_point_y = (left_wrist.y + right_wrist.y) / 2
+
+                            rel_x = (control_point_x - body_center_x) * 2
+                            rel_y = (control_point_y - body_center_y) * 2
+
+                            deadzone = 0.1
+                            if abs(rel_x) < deadzone: rel_x = 0
+                            if abs(rel_y) < deadzone: rel_y = 0
+
+                            hand_dist_from_center = math.sqrt(rel_x ** 2 + rel_y ** 2)
+                            dynamic_sensitivity = self.pointer_speed_multiplier * (1 + hand_dist_from_center * 3)
+
+                            cursor_x = screen_center_x + int(rel_x * dynamic_sensitivity * 500)
+                            cursor_y = screen_center_y + int(rel_y * dynamic_sensitivity * 500)
+
+                            point_x = int(control_point_x * w)
+                            point_y = int(control_point_y * h)
+                            body_px = int(body_center_x * w)
+                            body_py = int(body_center_y * h)
+                            cv2.circle(frame, (point_x, point_y), 20, (0, 255, 255), -1)
+                            cv2.line(frame, (body_px, body_py), (point_x, point_y), (0, 255, 0), 2)
+
+                        elif self.enable_toggle_mode_nearby and hand_results and hand_results.multi_hand_landmarks:
+                            hand_landmarks = hand_results.multi_hand_landmarks[0]
+                            index_finger = hand_landmarks.landmark[8]
+                            control_point_x = index_finger.x
+                            control_point_y = index_finger.y
+
+                            rel_x = (control_point_x - body_center_x) * 2
+                            rel_y = (control_point_y - body_center_y) * 2
+
+                            deadzone = 0.1
+                            if abs(rel_x) < deadzone: rel_x = 0
+                            if abs(rel_y) < deadzone: rel_y = 0
+
+                            dynamic_sensitivity = self.pointer_speed_multiplier
+                            cursor_x = screen_center_x + int(rel_x * dynamic_sensitivity * 500)
+                            cursor_y = screen_center_y + int(rel_y * dynamic_sensitivity * 500)
+
+                            point_x = int(control_point_x * w)
+                            point_y = int(control_point_y * h)
+                            cv2.circle(frame, (point_x, point_y), 10, (0, 255, 255), -1)
+
+                        cursor_x = max(0, min(screen_width, cursor_x))
+                        cursor_y = max(0, min(screen_height, cursor_y))
+                        pyautogui.moveTo(cursor_x, cursor_y, _pause=False)
+
+                        if current_time - self.last_center_time > 2.0:
+                            pyautogui.moveTo(screen_center_x, screen_center_y, _pause=False)
+                            self.last_center_time = current_time
+
+                        mode_name = "CONFERENCE" if self.enable_toggle_mode_conference else "NEARBY"
+                        cv2.putText(frame, f"JOYSTICK MODE ({mode_name})", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    # ======================
+                    # SLIDE CONTROL MODE
+                    # ======================
+                    else:
+                        if self.dynamic_zoom:
+                            current_shoulder_dist = self.calculate_shoulder_distance(landmarks, w)
+                            if self.shoulder_distance_ref is None:
+                                self.shoulder_distance_ref = current_shoulder_dist
+                            zoom_factor = self.base_zoom_factor * (self.shoulder_distance_ref / current_shoulder_dist)
+                            zoom_factor = max(1.0, min(zoom_factor, 10.0))
+                        else:
+                            zoom_factor = self.base_zoom_factor
+
+                        crop_w = int(w / zoom_factor)
+                        crop_h = int(h / zoom_factor)
+                        center_x = int((left_shoulder.x + right_shoulder.x) / 2 * w)
+                        center_y = int((left_shoulder.y + right_shoulder.y) / 2 * h)
+                        x1 = max(0, min(center_x - crop_w // 2, w - crop_w))
+                        y1 = max(0, min(center_y - crop_h // 2, h - crop_h))
+                        cropped_frame = frame[y1:y1 + crop_h, x1:x1 + crop_w]
+                        frame = cv2.resize(cropped_frame, (w, h))
+
+                        cv2.putText(frame, "SLIDE MODE", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        cv2.putText(frame, f"Zoom: {zoom_factor:.1f}x", (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                        if current_time - self.last_gesture_time > self.slide_delay:
+                            # --- President mode gesture ---
+                            if self.president_mode and hand_results:
+                                right_palm = self.detect_open_palm(hand_results, 'Right')
+                                left_palm = self.detect_open_palm(hand_results, 'Left')
+                                if right_palm:
+                                    pyautogui.press('right')   # right palm = next slide
+                                    self.last_gesture_time = current_time
+                                    cv2.putText(frame, "NEXT SLIDE (Palm)", (w // 2 - 70, h - 30),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                                elif left_palm:
+                                    pyautogui.press('left')    # left palm = previous slide
+                                    self.last_gesture_time = current_time
+                                    cv2.putText(frame, "PREV SLIDE (Palm)", (w // 2 - 70, h - 30),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            else:
+                                right_hand_raised = (right_wrist.y < eye_level and
+                                                     right_wrist.visibility > self.gesture_threshold and
+                                                     left_wrist.y > eye_level * 1.1)
+                                left_hand_raised = (left_wrist.y < eye_level and
+                                                    left_wrist.visibility > self.gesture_threshold and
+                                                    right_wrist.y > eye_level * 1.1)
+
+                                if right_hand_raised:
+                                    pyautogui.press('left')
+                                    self.last_gesture_time = current_time
+                                    cv2.putText(frame, "PREV SLIDE", (w // 2 - 70, h - 30),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                                elif left_hand_raised:
+                                    pyautogui.press('right')
+                                    self.last_gesture_time = current_time
+                                    cv2.putText(frame, "NEXT SLIDE", (w // 2 - 70, h - 30),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                    # Draw pose landmarks
+                    self.mp_drawing.draw_landmarks(
+                        frame, pose_results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS)
+
+        except Exception as e:
+            print(f"Error in process_control_mode_high: {e}")
+
+        return frame
+
+    def process_control_mode_normal(self, frame):
+        try:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = frame.shape
+
+            # --- Eye control: run face mesh if enabled ---
+            if self.eye_control_enabled:
+                face_results = self.face_mesh.process(rgb_frame)
+                if face_results.multi_face_landmarks:
+                    face_landmarks = face_results.multi_face_landmarks[0].landmark
+                    self.process_eye_closure(frame, face_landmarks, w, h)
+
+            # Voice control status
+            if self.enable_voice_control and not self.pointer_mode:
+                try:
+                    cv2.putText(frame, "VOICE CONTROL ACTIVE", (w - 250, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                except:
+                    pass
+
+            # Furniture detection (only if enabled)
+            chairs, tables = [], []
+            if self.enable_furniture_detection:
+                chairs, tables = self.detect_furniture(frame)
+                for chair in chairs:
+                    x1, y1, x2, y2 = map(int, chair)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                    cv2.putText(frame, "Chair", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                for table in tables:
+                    x1, y1, x2, y2 = map(int, table)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
+                    cv2.putText(frame, "Table", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+
+            # Process pose detection
+            pose_results = self.pose.process(rgb_frame)
+
+            # Process hand detection (for toggle, pinch click and President palm)
+            hand_results = None
+            if self.enable_toggle_mode_nearby or self.president_mode:
+                hand_results = self.hands.process(rgb_frame)
+
+            if pose_results.pose_landmarks:
+                landmarks = pose_results.pose_landmarks.landmark
+
+                # Get key body points
+                left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
+                right_wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
+                left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+                right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+                left_eye = landmarks[self.mp_pose.PoseLandmark.LEFT_EYE]
+                right_eye = landmarks[self.mp_pose.PoseLandmark.RIGHT_EYE]
+
+                # Body center calculations
+                body_center_x = (left_shoulder.x + right_shoulder.x) / 2
+                body_center_y = (left_shoulder.y + right_shoulder.y) / 2
+                eye_level = (left_eye.y + right_eye.y) / 2
+
+                # Initialize posture/furniture flags
+                is_sitting = False
+                valid_posture = True
+                near_furniture = False
+
+                if self.enable_pose_estimation:
+                    is_sitting = self.determine_posture(landmarks) == "SITTING"
+
+                if self.validate_posture:
+                    valid_posture = self.check_posture(landmarks, w, h)
+
+                if self.enable_furniture_detection:
+                    near_furniture = self.is_person_near_furniture(landmarks, chairs, tables, w, h)
+
+                # Teacher mode restrictions
+                teacher_restriction_active = False
+                if self.teacher_mode_active:
+                    if self.enable_pose_estimation and is_sitting:
+                        teacher_restriction_active = True
+                    if self.enable_furniture_detection and near_furniture:
+                        teacher_restriction_active = True
+
+                if teacher_restriction_active:
+                    cv2.putText(frame, "STUDENT DETECTED - CONTROL DISABLED",
+                                (w // 2 - 200, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    return frame
+
+                current_time = time.time()
+
+                # Posture validation
+                posture_restriction = False
+                if self.validate_posture and not valid_posture:
+                    cv2.putText(frame, "INVALID POSTURE - STAND STRAIGHT",
+                                (w // 2 - 200, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    posture_restriction = True
+
+                if self.enable_pose_estimation and is_sitting:
+                    cv2.putText(frame, "SITTING DETECTED - STAND UP TO CONTROL",
+                                (w // 2 - 250, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    posture_restriction = True
+
+                if posture_restriction:
+                    if self.pointer_mode:
+                        self.pointer_mode = False
+                        if self.use_laser_hotkey:
+                            pyautogui.hotkey('ctrl', 'l')
+                    self.both_hands_up_start = 0
+                    self.pinch_active = False  # Reset pinch state
+                    return frame
+
+                # --- Toggle mode activation logic ---
+                toggle_triggered = False
+                hold_threshold = 3.0  # default, will be overridden
+                hands_conference = False
+                max_hand_dist = 0.0
+
+                # ======================
+                # NEARBY MODE
+                # ======================
+                if self.enable_toggle_mode_nearby and hand_results:
+                    # ----- Two‑finger raised (toggle pointer mode) -----
+                    two_fingers_raised = self.check_two_fingers_raised(hand_results)
+                    current_time = time.time()
+
+                    if two_fingers_raised:
+                        if self.two_fingers_gesture_start is None:
+                            self.two_fingers_gesture_start = current_time
+                        else:
+                            duration = current_time - self.two_fingers_gesture_start
+                            if duration < self.two_fingers_toggle_threshold:
+                                remaining = int(self.two_fingers_toggle_threshold - duration) + 1
+                                cv2.putText(frame, f"{remaining}", (w // 2, 120),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+                                cv2.putText(frame, "HOLD FOR TOGGLE", (50, 120),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                            else:
+                                # Toggle pointer mode
+                                self.pointer_mode = not self.pointer_mode
+                                self.two_fingers_gesture_start = None
+                                if self.use_laser_hotkey:
+                                    pyautogui.hotkey('ctrl', 'l')
+                                if self.pointer_mode:
+                                    screen_width, screen_height = pyautogui.size()
+                                    pyautogui.moveTo(screen_width // 2, screen_height // 2)
+                                    self.last_center_time = current_time
+                                status_msg = "POINTER MODE ON" if self.pointer_mode else "SLIDE MODE ON"
+                                cv2.putText(frame, status_msg, (w // 2 - 100, 60),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    else:
+                        if self.two_fingers_gesture_start is not None:
+                            # Released before toggle threshold – no click action
+                            self.two_fingers_gesture_start = None
+
+                    # ----- Pinch click (index + thumb) – only when pointer mode active -----
+                    if self.pointer_mode and self.pinch_click_enabled and hand_results.multi_hand_landmarks:
+                        hand_landmarks = hand_results.multi_hand_landmarks[0]
+                        pinch = self.check_index_thumb_pinch(hand_landmarks, w, h, self.pinch_threshold)
+
+                        if pinch and not self.pinch_active:
+                            self.pinch_active = True
+                        elif not pinch and self.pinch_active:
+                            # Pinch released -> click if cooldown passed
+                            if current_time - self.last_pinch_click_time > self.click_cooldown:
+                                pyautogui.click()
+                                self.last_pinch_click_time = current_time
+                                cv2.putText(frame, "PINCH CLICK", (10, 390),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                            self.pinch_active = False
+                    else:
+                        # Reset pinch state when pointer mode is off
+                        self.pinch_active = False
+
+                # ======================
+                # CONFERENCE MODE
+                # ======================
+                if self.enable_toggle_mode_conference:
+                    pixel_distance = abs(left_wrist.x - right_wrist.x) * w
+                    cm_per_pixel = 40 / (0.2 * w)
+                    distance_cm = pixel_distance * cm_per_pixel
+
+                    left_hand_dist = ((left_wrist.x - body_center_x) ** 2 + (left_wrist.y - body_center_y) ** 2) ** 0.5
+                    right_hand_dist = ((right_wrist.x - body_center_x) ** 2 + (
+                                right_wrist.y - body_center_y) ** 2) ** 0.5
+                    max_hand_dist = max(left_hand_dist, right_hand_dist)
+                    conference_threshold = 10 + 20 * max_hand_dist
+                    hands_conference = (distance_cm <= conference_threshold and
+                                        left_wrist.visibility > 0.7 and
+                                        right_wrist.visibility > 0.7)
+                    if hands_conference:
+                        toggle_triggered = True
+                        hold_threshold = self.both_hands_up_threshold  # base 3.0
+
+                    # Draw distance feedback
+                    left_x = int(left_wrist.x * w)
+                    right_x = int(right_wrist.x * w)
+                    cv2.line(frame, (left_x, 100), (right_x, 100), (0, 255, 255), 2)
+                    color = (0, 255, 0) if hands_conference else (0, 0, 255)
+                    cv2.putText(frame, f"{distance_cm:.0f}cm", ((left_x + right_x) // 2, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+                    if self.enable_toggle_mode_conference:
+                        cv2.putText(frame, f"Conf Thresh: {conference_threshold:.1f}cm", (w - 250, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                        cv2.putText(frame, f"Hand Dist: {max_hand_dist:.2f}", (w - 250, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+                    # Conference mode toggle processing
+                    if toggle_triggered:
+                        if self.both_hands_up_start == 0:
+                            self.both_hands_up_start = current_time
+                            cv2.putText(frame, f"HOLD FOR {int(hold_threshold)}s TO TOGGLE POINTER", (50, 120),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                        else:
+                            if hands_conference:
+                                dynamic_hold_time = max(1.0, self.both_hands_up_threshold * (1 - max_hand_dist * 2))
+                                remaining_time = dynamic_hold_time - (current_time - self.both_hands_up_start)
+                                hold_time_used = dynamic_hold_time
+                            else:
+                                hold_time_used = hold_threshold
+                                remaining_time = hold_time_used - (current_time - self.both_hands_up_start)
+
+                            if remaining_time > 0:
+                                remaining = int(remaining_time) + 1
+                                cv2.putText(frame, f"{remaining}", (w // 2, 120),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+
+                            if current_time - self.both_hands_up_start >= hold_time_used:
+                                self.pointer_mode = not self.pointer_mode
+                                self.both_hands_up_start = 0
+                                if self.use_laser_hotkey:
+                                    pyautogui.hotkey('ctrl', 'l')
+                                if self.pointer_mode:
+                                    screen_width, screen_height = pyautogui.size()
+                                    pyautogui.moveTo(screen_width // 2, screen_height // 2)
+                                    self.last_center_time = current_time
+                                status_msg = "POINTER MODE ON" if self.pointer_mode else "SLIDE MODE ON"
+                                cv2.putText(frame, status_msg, (w // 2 - 100, 60),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    else:
+                        self.both_hands_up_start = 0
+
+                # ======================
+                # POINTER MODE (Joystick)
+                # ======================
+                if self.pointer_mode:
+                    screen_width, screen_height = pyautogui.size()
+                    screen_center_x = screen_width // 2
+                    screen_center_y = screen_height // 2
+
+                    if self.enable_toggle_mode_conference:
+                        # Use whichever hand is higher (more raised)
+                        active_hand = left_wrist if left_wrist.y < right_wrist.y else right_wrist
+                        control_point_x = active_hand.x
+                        control_point_y = active_hand.y
+
+                        hand_dist_from_center = ((control_point_x - body_center_x) ** 2 +
+                                                 (control_point_y - body_center_y) ** 2) ** 0.5
+                        dynamic_sensitivity = self.pointer_speed_multiplier * (1 + hand_dist_from_center * 2)
+
+                        point_x = int(control_point_x * w)
+                        point_y = int(control_point_y * h)
+                        body_px = int(body_center_x * w)
+                        body_py = int(body_center_y * h)
+                        cv2.circle(frame, (point_x, point_y), 20, (0, 255, 255), -1)
+                        cv2.line(frame, (body_px, body_py), (point_x, point_y), (0, 255, 0), 2)
+
+                        rel_x = (control_point_x - body_center_x) * 2
+                        rel_y = (control_point_y - body_center_y) * 2
+                        move_x = rel_x * dynamic_sensitivity * 500
+                        move_y = rel_y * dynamic_sensitivity * 500
+                        cursor_x = screen_center_x + int(move_x)
+                        cursor_y = screen_center_y + int(move_y)
+                        cv2.putText(frame, f"Sensitivity: {dynamic_sensitivity:.1f}x", (w - 250, 90),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+                    elif self.enable_toggle_mode_nearby and hand_results and hand_results.multi_hand_landmarks:
+                        hand_landmarks = hand_results.multi_hand_landmarks[0]
+                        index_finger = hand_landmarks.landmark[8]
+                        control_point_x = index_finger.x
+                        control_point_y = index_finger.y
+                        dynamic_sensitivity = self.pointer_speed_multiplier
+
+                        self.mp_drawing.draw_landmarks(
+                            frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+                        point_x = int(control_point_x * w)
+                        point_y = int(control_point_y * h)
+                        cv2.circle(frame, (point_x, point_y), 10, (0, 255, 255), -1)
+
+                        rel_x = (control_point_x - 0.5) * 2
+                        rel_y = (control_point_y - 0.5) * 2
+                        move_x = rel_x * dynamic_sensitivity * 500
+                        move_y = rel_y * dynamic_sensitivity * 500
+                        cursor_x = screen_center_x + int(move_x)
+                        cursor_y = screen_center_y + int(move_y)
+
+                    # Common cursor movement for both modes
+                    cursor_x = max(0, min(screen_width, cursor_x))
+                    cursor_y = max(0, min(screen_height, cursor_y))
+                    pyautogui.moveTo(cursor_x, cursor_y, _pause=False)
+
+                    # Display mode status
+                    mode_name = "CONFERENCE" if self.enable_toggle_mode_conference else "NEARBY"
+                    cv2.putText(frame, f"JOYSTICK MODE ({mode_name}) - Speed: {dynamic_sensitivity:.1f}x",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                # ======================
+                # SLIDE CONTROL MODE
+                # ======================
+                else:
+                    # Dynamic zoom calculation
+                    if self.dynamic_zoom:
+                        current_shoulder_dist = self.calculate_shoulder_distance(landmarks, w)
+                        if self.shoulder_distance_ref is None:
+                            self.shoulder_distance_ref = current_shoulder_dist
+                        zoom_factor = self.base_zoom_factor * (self.shoulder_distance_ref / current_shoulder_dist)
+                        zoom_factor = max(1.0, min(zoom_factor, 10.0))
+                    else:
+                        zoom_factor = self.base_zoom_factor
+
+                    # Apply zoom
+                    crop_w = int(w / zoom_factor)
+                    crop_h = int(h / zoom_factor)
+                    center_x = int((left_shoulder.x + right_shoulder.x) / 2 * w)
+                    center_y = int((left_shoulder.y + right_shoulder.y) / 2 * h)
+                    x1 = max(0, min(center_x - crop_w // 2, w - crop_w))
+                    y1 = max(0, min(center_y - crop_h // 2, h - crop_h))
+                    cropped_frame = frame[y1:y1 + crop_h, x1:x1 + crop_w]
+                    frame = cv2.resize(cropped_frame, (w, h))
+
+                    cv2.putText(frame, "SLIDE MODE", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(frame, f"Zoom: {zoom_factor:.1f}x", (10, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    # Slide control gestures
+                    if current_time - self.last_gesture_time > self.slide_delay:
+                        # --- President mode gesture ---
+                        if self.president_mode and hand_results:
+                            right_palm = self.detect_open_palm(hand_results, 'Right')
+                            left_palm = self.detect_open_palm(hand_results, 'Left')
+                            if right_palm:
+                                pyautogui.press('right')   # right palm = next slide
+                                self.last_gesture_time = current_time
+                                cv2.putText(frame, "NEXT SLIDE (Palm)", (w // 2 - 70, h - 30),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            elif left_palm:
+                                pyautogui.press('left')    # left palm = previous slide
+                                self.last_gesture_time = current_time
+                                cv2.putText(frame, "PREV SLIDE (Palm)", (w // 2 - 70, h - 30),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        else:
+                            right_hand_raised = (right_wrist.y < eye_level and
+                                                 right_wrist.visibility > self.gesture_threshold and
+                                                 left_wrist.y > eye_level * 1.1)
+                            left_hand_raised = (left_wrist.y < eye_level and
+                                                left_wrist.visibility > self.gesture_threshold and
+                                                right_wrist.y > eye_level * 1.1)
+
+                            if right_hand_raised:
+                                pyautogui.press('left')
+                                self.last_gesture_time = current_time
+                                cv2.putText(frame, "PREV SLIDE", (w // 2 - 70, h - 30),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            elif left_hand_raised:
+                                pyautogui.press('right')
+                                self.last_gesture_time = current_time
+                                cv2.putText(frame, "NEXT SLIDE", (w // 2 - 70, h - 30),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                # Draw pose landmarks
+                self.mp_drawing.draw_landmarks(
+                    frame, pose_results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS)
+
+        except Exception as e:
+            print(f"Error in process_control_mode_normal: {e}")
+
+        return frame
+
+    def calculate_shoulder_distance(self, landmarks, frame_width):
+        left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+        right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+        return abs(left_shoulder.x - right_shoulder.x) * frame_width
+
+    def check_posture(self, landmarks, frame_width, frame_height):
+        if not self.validate_posture:
+            return True
+
+        required_landmarks = [
+            self.mp_pose.PoseLandmark.LEFT_SHOULDER,
+            self.mp_pose.PoseLandmark.RIGHT_SHOULDER,
+            self.mp_pose.PoseLandmark.LEFT_HIP,
+            self.mp_pose.PoseLandmark.RIGHT_HIP,
+            self.mp_pose.PoseLandmark.LEFT_KNEE,
+            self.mp_pose.PoseLandmark.RIGHT_KNEE,
+            self.mp_pose.PoseLandmark.LEFT_ANKLE,
+            self.mp_pose.PoseLandmark.RIGHT_ANKLE
+        ]
+
+        for landmark in required_landmarks:
+            if landmarks[landmark].visibility < self.pose_threshold:
+                return False
+
+        left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+        right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+        left_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+        right_hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+        left_knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+        right_knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+        left_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+        right_ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+
+        shoulder_center_y = (left_shoulder.y + right_shoulder.y) / 2
+        hip_center_y = (left_hip.y + right_hip.y) / 2
+        knee_center_y = (left_knee.y + right_knee.y) / 2
+        ankle_center_y = (left_ankle.y + right_ankle.y) / 2
+
+        if not (shoulder_center_y < hip_center_y < knee_center_y < ankle_center_y):
+            return False
+
+        shoulder_slope = abs(left_shoulder.y - right_shoulder.y)
+        hip_slope = abs(left_hip.y - right_hip.y)
+        if shoulder_slope > 0.1 or hip_slope > 0.1:
+            return False
+
+        hip_knee_dist = abs(hip_center_y - knee_center_y)
+        knee_ankle_dist = abs(knee_center_y - ankle_center_y)
+
+        if abs(hip_knee_dist - knee_ankle_dist) > 0.15:
+            return False
+
+        return True
+
+    def validate_posture(self, landmarks, frame_width, frame_height):
+        """Check if the person is in a proper standing posture"""
+        required_landmarks = [
+            self.mp_pose.PoseLandmark.LEFT_SHOULDER,
+            self.mp_pose.PoseLandmark.RIGHT_SHOULDER,
+            self.mp_pose.PoseLandmark.LEFT_HIP,
+            self.mp_pose.PoseLandmark.RIGHT_HIP,
+            self.mp_pose.PoseLandmark.LEFT_KNEE,
+            self.mp_pose.PoseLandmark.RIGHT_KNEE,
+            self.mp_pose.PoseLandmark.LEFT_ANKLE,
+            self.mp_pose.PoseLandmark.RIGHT_ANKLE
+        ]
+
+        for landmark in required_landmarks:
+            if landmarks[landmark].visibility < self.pose_threshold:
+                return False
+
+        left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+        right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+        left_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+        right_hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+        left_knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+        right_knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+        left_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+        right_ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+
+        shoulder_center_y = (left_shoulder.y + right_shoulder.y) / 2
+        hip_center_y = (left_hip.y + right_hip.y) / 2
+        knee_center_y = (left_knee.y + right_knee.y) / 2
+        ankle_center_y = (left_ankle.y + right_ankle.y) / 2
+
+        if not (shoulder_center_y < hip_center_y < knee_center_y < ankle_center_y):
+            return False
+
+        shoulder_slope = abs(left_shoulder.y - right_shoulder.y)
+        hip_slope = abs(left_hip.y - right_hip.y)
+        if shoulder_slope > 0.1 or hip_slope > 0.1:
+            return False
+
+        hip_knee_dist = abs(hip_center_y - knee_center_y)
+        knee_ankle_dist = abs(knee_center_y - ankle_center_y)
+
+        if abs(hip_knee_dist - knee_ankle_dist) > 0.15:
+            return False
+
+        return True
+
+    def process_pose_estimation(self, frame):
+        """Process frame with pose estimation and return results"""
+        if not self.enable_pose_estimation or not self.pose_estimation_model:
+            return frame, None
+
+        try:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.pose_estimation_model.process(rgb_frame)
+
+            if results.pose_landmarks:
+                posture = self.determine_posture(results.pose_landmarks.landmark)
+
+                text = f"{posture}"
+                font_scale = 1.2
+                thickness = 2
+                text_color = (0, 255, 0) if posture == "STANDING" else (0, 0, 255)
+
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+                text_x = 20
+                text_y = frame.shape[0] - 30
+
+                cv2.rectangle(frame,
+                              (text_x - 10, text_y - text_height - 10),
+                              (text_x + text_width + 10, text_y + 10),
+                              (0, 0, 0), -1)
+
+                cv2.putText(frame, text, (text_x, text_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                            text_color, thickness)
+
+                return frame, posture
+            return frame, None
+        except Exception as e:
+            print(f"Error in pose estimation: {e}")
+            return frame, None
+
+    def determine_posture(self, landmarks):
+        """Determine if the person is standing or sitting based on landmarks"""
+        try:
+            left_shoulder = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER]
+            right_shoulder = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER]
+            left_hip = landmarks[mp.solutions.pose.PoseLandmark.LEFT_HIP]
+            right_hip = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_HIP]
+            left_knee = landmarks[mp.solutions.pose.PoseLandmark.LEFT_KNEE]
+            right_knee = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_KNEE]
+
+            shoulder_avg = (left_shoulder.y + right_shoulder.y) / 2
+            hip_avg = (left_hip.y + right_hip.y) / 2
+            knee_avg = (left_knee.y + right_knee.y) / 2
+
+            shoulder_hip_dist = abs(shoulder_avg - hip_avg)
+            hip_knee_dist = abs(hip_avg - knee_avg)
+
+            if hip_knee_dist < shoulder_hip_dist * 0.6:
+                return "SITTING"
+            else:
+                return "STANDING"
+        except Exception as e:
+            print(f"Error determining posture: {e}")
+            return "UNKNOWN"
+
+    def determine_if_standing(self, landmarks):
+        """Check if a person is standing based on pose landmarks."""
+        try:
+            left_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+            right_hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+            left_knee = landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE]
+            right_knee = landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE]
+            left_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
+            right_ankle = landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
+
+            hip_y = (left_hip.y + right_hip.y) / 2
+            knee_y = (left_knee.y + right_knee.y) / 2
+            ankle_y = (left_ankle.y + right_ankle.y) / 2
+
+            return (hip_y < knee_y < ankle_y)
+        except:
+            return False
+
+    def initialize_pose_estimation(self):
+        """Initialize the MediaPipe pose estimation model using bundled solution"""
+        try:
+            self.pose_estimation_model = mp.solutions.pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                smooth_landmarks=True,
+                enable_segmentation=False,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5)
+            print("Pose estimation initialized using bundled MediaPipe model")
+        except Exception as e:
+            print(f"Could not initialize pose estimation: {e}")
+            self.pose_estimation_model = None
+            self.set_status(f"Pose estimation error: {str(e)}")
+
+    def load_furniture_model(self):
+        """Load YOLO model for furniture detection"""
+        try:
+            self.furniture_model = YOLO('yolov8n.pt')
+            self.set_status("Furniture detection model loaded")
+        except Exception as e:
+            self.set_status(f"Failed to load furniture model: {str(e)}")
+            self.furniture_model = None
+
+    def detect_furniture(self, frame):
+        """Detect chairs and tables in the frame"""
+        chairs = []
+        tables = []
+
+        if not self.enable_furniture_detection or self.furniture_model is None:
+            return chairs, tables
+
+        try:
+            results = self.furniture_model(frame, verbose=False)
+
+            for result in results:
+                for box in result.boxes:
+                    class_id = int(box.cls)
+                    label = self.furniture_model.names[class_id]
+
+                    if class_id == 56:
+                        chairs.append(box.xyxy[0].tolist())
+                    elif class_id == 60 or label.lower() == 'dining table':
+                        tables.append(box.xyxy[0].tolist())
+
+            return chairs, tables
+        except Exception as e:
+            print(f"Error in furniture detection: {e}")
+            return [], []
+
+    def detect_open_palm(self, hand_results, desired_hand_label):
+        """
+        Check if the desired hand ( 'Left' or 'Right') is showing an open palm
+        facing the camera. Returns True if:
+          - Handedness matches.
+          - All five fingertips are above their PIP joints (fingers extended).
+          - The hand is roughly vertical (palm facing camera).
+        """
+        if not hand_results or not hand_results.multi_hand_landmarks:
+            return False
+
+        for i, hand_landmarks in enumerate(hand_results.multi_hand_landmarks):
+            # Determine hand side
+            if hand_results.multi_handedness:
+                handedness = hand_results.multi_handedness[i].classification[0].label
+            else:
+                # Fallback if handedness not available
+                continue
+
+            if handedness != desired_hand_label:
+                continue
+
+            # Check all five fingertips are extended (y_tip < y_pip for a hand pointing up)
+            TIPS = [4, 8, 12, 16, 20]  # thumb, index, middle, ring, pinky
+            PIPS = [3, 6, 10, 14, 18]  # thumb IP, index PIP, etc.
+            all_extended = True
+            for tip, pip in zip(TIPS, PIPS):
+                if hand_landmarks.landmark[tip].y >= hand_landmarks.landmark[pip].y:
+                    all_extended = False
+                    break
+
+            if not all_extended:
+                continue
+
+            # Rough vertical check: the line from wrist (0) to middle finger MCP (9) should be
+            # more vertical than horizontal. This ensures the palm is facing the camera.
+            wrist = hand_landmarks.landmark[0]
+            mid_mcp = hand_landmarks.landmark[9]
+            dx = mid_mcp.x - wrist.x
+            dy = mid_mcp.y - wrist.y
+            # We expect dy to be negative (MCP above wrist) and |dy| > |dx| for vertical orientation
+            if dy >= 0 or abs(dx) > abs(dy) * 0.5:
+                continue
+
+            return True
+
+        return False
+
+    def is_person_near_furniture(self, person_landmarks, chairs, tables, frame_width, frame_height):
+        """Check if person is near furniture"""
+        if not chairs and not tables:
+            return False
+
+        left_hip = person_landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
+        right_hip = person_landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP]
+        person_x = (left_hip.x + right_hip.x) / 2
+        person_y = (left_hip.y + right_hip.y) / 2
+
+        for chair in chairs:
+            chair_center_x = (chair[0] + chair[2]) / 2 / frame_width
+            chair_center_y = (chair[1] + chair[3]) / 2 / frame_height
+            distance = math.sqrt((person_x - chair_center_x) ** 2 + (person_y - chair_center_y) ** 2)
+            if distance < self.chair_distance_threshold:
+                return True
+
+        for table in tables:
+            table_center_x = (table[0] + table[2]) / 2 / frame_width
+            table_center_y = (table[1] + table[3]) / 2 / frame_height
+            distance = math.sqrt((person_x - table_center_x) ** 2 + (person_y - table_center_y) ** 2)
+            if distance < self.table_distance_threshold:
+                return True
+
+        return False
+
+    def change_language(self, event=None):
+        lang = self.lang_var.get()
+        self.set_status(f"Language changed to {lang}")
+
+    def eye_aspect_ratio_px(self, landmarks, eye_indices, image_w, image_h):
+        """
+        Calculate the eye aspect ratio (EAR) for one eye using six landmark points.
+        landmarks: list of MediaPipe landmark objects (normalized coordinates).
+        eye_indices: list of six landmark indices for that eye.
+        image_w, image_h: dimensions of the frame.
+        Returns the EAR as a float.
+        """
+        pts = []
+        for idx in eye_indices:
+            lm = landmarks[idx]
+            pts.append(np.array([int(lm.x * image_w), int(lm.y * image_h)], dtype=np.float32))
+
+        p1, p2, p3, p4, p5, p6 = pts
+
+        vertical1 = np.linalg.norm(p2 - p6)
+        vertical2 = np.linalg.norm(p3 - p5)
+        horizontal = np.linalg.norm(p1 - p4)
+
+        ear = (vertical1 + vertical2) / (2.0 * (horizontal + 1e-6))
+        return ear
+
+    def process_eye_closure(self, frame, face_landmarks, w, h):
+        """
+        Processes eye closure using face landmarks.
+        Simulates a mouse click only if pointer mode is active.
+        Draws visual feedback on the frame.
+        """
+        LEFT_EYE = [33, 160, 158, 133, 153, 144]
+        RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+
+        left_ear = self.eye_aspect_ratio_px(face_landmarks, LEFT_EYE, w, h)
+        right_ear = self.eye_aspect_ratio_px(face_landmarks, RIGHT_EYE, w, h)
+        avg_ear = (left_ear + right_ear) / 2.0
+
+        self.left_smooth.append(left_ear)
+        self.right_smooth.append(right_ear)
+        self.avg_smooth.append(avg_ear)
+
+        left_sm = float(np.median(self.left_smooth)) if self.left_smooth else left_ear
+        right_sm = float(np.median(self.right_smooth)) if self.right_smooth else right_ear
+        avg_sm = float(np.median(self.avg_smooth)) if self.avg_smooth else avg_ear
+
+        thresh = self.calibrated_threshold if self.calibrated_threshold is not None else 0.20
+
+        left_closed = left_sm < thresh
+        right_closed = right_sm < thresh
+
+        current_time = time.time()
+
+        if self.calibrating_eye:
+            self.calib_frames.append(avg_ear)
+            cv2.putText(frame, f"Calibrating eyes... {len(self.calib_frames)}/{self.calib_frames_needed}",
+                        (10, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            if len(self.calib_frames) >= self.calib_frames_needed:
+                open_avg = float(np.mean(self.calib_frames))
+                self.calibrated_threshold = max(0.12, open_avg * 0.70)
+                self.calibrating_eye = False
+                self.calib_frames = []
+                self.set_status(f"Eye threshold calibrated: {self.calibrated_threshold:.3f}")
+
+        # Click simulation (only in pointer mode)
+        if self.pointer_mode and (left_closed ^ right_closed):
+            closed_eye = 'left' if left_closed else 'right'
+
+            if self.eye_closure_start is None:
+                self.eye_closure_start = current_time
+                self.closure_eye = closed_eye
+                cv2.putText(frame, f"Hold {closed_eye} eye for {self.hold_time}s", (10, 330),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            elif self.closure_eye == closed_eye:
+                elapsed = current_time - self.eye_closure_start
+                if elapsed >= self.hold_time:
+                    if current_time - self.last_click_time > self.click_cooldown:
+                        pyautogui.click()
+                        self.last_click_time = current_time
+                        cv2.putText(frame, "CLICK!", (10, 360),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    self.eye_closure_start = None
+                    self.closure_eye = None
+                else:
+                    remaining = self.hold_time - elapsed
+                    cv2.putText(frame, f"Hold for {remaining:.1f}s more", (10, 360),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            else:
+                self.eye_closure_start = None
+                self.closure_eye = None
+        else:
+            self.eye_closure_start = None
+            self.closure_eye = None
+
+        for idx in LEFT_EYE:
+            x = int(face_landmarks[idx].x * w)
+            y = int(face_landmarks[idx].y * h)
+            cv2.circle(frame, (x, y), 3, (255, 0, 0), -1)
+        for idx in RIGHT_EYE:
+            x = int(face_landmarks[idx].x * w)
+            y = int(face_landmarks[idx].y * h)
+            cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
+
+        cv2.putText(frame, f"L-EAR:{left_sm:.3f} R-EAR:{right_sm:.3f} Th:{thresh:.3f}",
+                    (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 2)
+
+        return left_closed, right_closed
+
+    def check_two_fingers_raised(self, hand_results):
+        """
+        Check if two fingers (index and middle) are raised on any detected hand.
+        Returns True if both are raised and ring and pinky are down.
+        """
+        if not hand_results or not hand_results.multi_hand_landmarks:
+            return False
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            INDEX_TIP = 8
+            INDEX_PIP = 6
+            MIDDLE_TIP = 12
+            MIDDLE_PIP = 10
+            RING_TIP = 16
+            RING_PIP = 14
+            PINKY_TIP = 20
+            PINKY_PIP = 18
+
+            index_raised = hand_landmarks.landmark[INDEX_TIP].y < hand_landmarks.landmark[INDEX_PIP].y
+            middle_raised = hand_landmarks.landmark[MIDDLE_TIP].y < hand_landmarks.landmark[MIDDLE_PIP].y
+            ring_down = hand_landmarks.landmark[RING_TIP].y >= hand_landmarks.landmark[RING_PIP].y
+            pinky_down = hand_landmarks.landmark[PINKY_TIP].y >= hand_landmarks.landmark[PINKY_PIP].y
+
+            if index_raised and middle_raised and ring_down and pinky_down:
+                return True
+        return False
+
+    def check_index_thumb_pinch(self, hand_landmarks, frame_width, frame_height, threshold=0.05):
+        """
+        Check if index finger tip and thumb tip are close (pinch).
+        Returns True if the distance between them is less than threshold.
+        """
+        thumb_tip = hand_landmarks.landmark[4]
+        index_tip = hand_landmarks.landmark[8]
+        dist = math.sqrt((thumb_tip.x - index_tip.x) ** 2 + (thumb_tip.y - index_tip.y) ** 2)
+        return dist < threshold
+
+    def show_main_app(self):
+        self.current_screen_method = self.show_main_app
+        self.create_main_app()
+
+    def show_settings(self):
+        self.current_screen_method = self.show_settings
+        self.create_settings()
+
+    def show_about(self):
+        self.current_screen_method = self.show_about
+        self.create_about()
+
+    def show_camera_error(self):
+        """Show camera error message exactly once"""
+        if hasattr(self, '_camera_error_shown') and self._camera_error_shown:
+            return
+
+        self._camera_error_shown = True
+
+        error_window = tk.Toplevel(self.root)
+        error_window.title("Camera Error")
+        error_window.resizable(False, False)
+
+        try:
+            error_window.iconbitmap(self.icon_path)
+        except:
+            pass
+
+        error_window.configure(bg=self.colors["primary"])
+        window_width = 400
+        window_height = 200
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        error_window.geometry(
+            f"{window_width}x{window_height}+"
+            f"{(screen_width // 2) - (window_width // 2)}+"
+            f"{(screen_height // 2) - (window_height // 2)}"
+        )
+
+        error_content = [
+            "Camera Error",
+            "",
+            "Another application is already using the camera",
+            "",
+        ]
+
+        for i, line in enumerate(error_content):
+            fg_color = self.colors["error"] if i == 0 else self.colors["text"]
+            font_weight = "bold" if i == 0 else "normal"
+
+            label = tk.Label(
+                error_window,
+                text=line,
+                font=(self.colors["font"][0], self.colors["font"][1], font_weight),
+                bg=self.colors["primary"],
+                fg=fg_color,
+                justify=tk.CENTER
+            )
+            label.pack(pady=0)
+
+        ok_button = ttk.Button(
+            error_window,
+            text="OK",
+            command=self.quit_application,
+            style="Accent.TButton"
+        )
+        ok_button.pack(pady=10)
+
+        error_window.protocol("WM_DELETE_WINDOW", self.quit_application)
+        error_window.grab_set()
+
+    def set_status(self, message):
+        if hasattr(self, 'status_var') and self.status_var is not None:
+            try:
+                self.status_var.set(message)
+                if hasattr(self, 'root') and self.root.winfo_exists():
+                    self.root.update()
+            except Exception as e:
+                print(f"Error updating status: {e}")
+
+    def setup_camera(self):
+        """Initialize camera with the currently selected index."""
+        try:
+            self.cap = cv2.VideoCapture(self.selected_camera_index)
+            if not self.cap.isOpened():
+                raise Exception("Could not open camera")
+            self.cap.set(3, self.width)
+            self.cap.set(4, self.height)
+            self._camera_error_shown = False
+            self._camera_failure_count = 0
+            print(f"Camera initialized: index {self.selected_camera_index}")
+        except Exception as e:
+            print(f"Camera error: {e}")
+            if not self._camera_error_shown:
+                self.show_camera_error()
+            self.cap = None
+
+    def setup_pose_detection(self):
+        self.mp_pose = solutions.pose
+        self.pose = self.mp_pose.Pose(
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+        self.mp_drawing = solutions.drawing_utils
+
+        self.mp_hands = solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5
+        )
+
+    def set_nearby_mode(self):
+        """Configure settings for nearby mode (small rooms, close distance)"""
+        self.base_zoom_factor = 1.0
+        self.dynamic_zoom = False
+        self.validate_posture = False
+        self.pointer_speed_multiplier = 2.0
+        self.enable_toggle_mode_nearby = True
+        self.enable_toggle_mode_conference = False
+        self.enable_voice_control = False
+        self.enable_furniture_detection = False
+        self.teacher_mode_active = False
+        self.enable_pose_estimation = False
+        # Two-fingers click is removed, so no need to set it
+        self.eye_control_enabled = False
+        self.mode_var.set("nearby")
+        # Ensure President mode is turned off when switching to Nearby preset
+        self.president_mode = False
+        if hasattr(self, 'president_mode_var'):
+            self.president_mode_var.set(False)
+        self.preferences.set('president_mode', False)
+        self._update_settings_ui()
+        self.set_status("Nearby mode activated...")
+
+        self.preferences.set('base_zoom_factor', self.base_zoom_factor)
+        self.preferences.set('dynamic_zoom', self.dynamic_zoom)
+        self.preferences.set('validate_posture', self.validate_posture)
+        self.preferences.set('pointer_speed', self.pointer_speed_multiplier)
+        self.preferences.set('enable_toggle_mode_nearby', self.enable_toggle_mode_nearby)
+        self.preferences.set('enable_toggle_mode_conference', self.enable_toggle_mode_conference)
+        self.preferences.set('mode', 'nearby')
+        self.preferences.set('teacher_mode', False)
+        self.preferences.set('enable_furniture_detection', False)
+        self.preferences.set('enable_voice_control', False)
+
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.set(self.base_zoom_factor)
+            self.dynamic_zoom_var.set(False)
+            self.posture_validation_var.set(False)
+            self.speed_slider.set(self.pointer_speed_multiplier)
+            self.toggle_mode_nearby_var.set(True)
+            self.toggle_mode_conference_var.set(False)
+        if hasattr(self, 'eye_control_var'):
+            self.eye_control_var.set(False)
+
+        self.set_status("Nearby mode activated: Optimized for small rooms with close distance (20-70cm gestures)")
+
+    def set_conference_mode(self):
+        """Configure settings for conference mode (large rooms, far distance)"""
+        self.base_zoom_factor = 1.0
+        self.dynamic_zoom = False
+        self.validate_posture = False
+        self.pointer_speed_multiplier = 8.0
+        self.enable_toggle_mode_nearby = False
+        self.enable_toggle_mode_conference = True
+        self.enable_voice_control = False
+        self.enable_furniture_detection = False
+        self.teacher_mode_active = False
+        self.enable_pose_estimation = False
+        # Two-fingers click removed
+        self.eye_control_enabled = False
+        self.use_laser_hotkey = True
+        # Ensure mode variable reflects Conference and disable President mode for this preset
+        self.mode_var.set("conference")
+        self.president_mode = False
+        if hasattr(self, 'president_mode_var'):
+            self.president_mode_var.set(False)
+        self.preferences.set('president_mode', False)
+
+        self.preferences.set('base_zoom_factor', self.base_zoom_factor)
+        self.preferences.set('dynamic_zoom', self.dynamic_zoom)
+        self.preferences.set('validate_posture', self.validate_posture)
+        self.preferences.set('pointer_speed', self.pointer_speed_multiplier)
+        self.preferences.set('enable_toggle_mode_nearby', self.enable_toggle_mode_nearby)
+        self.preferences.set('enable_toggle_mode_conference', self.enable_toggle_mode_conference)
+        self.preferences.set('mode', 'conference')
+        self.preferences.set('teacher_mode', False)
+        self.preferences.set('enable_furniture_detection', False)
+        self.preferences.set('enable_voice_control', False)
+
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.set(self.base_zoom_factor)
+            self.dynamic_zoom_var.set(False)
+            self.posture_validation_var.set(False)
+            self.speed_slider.set(self.pointer_speed_multiplier)
+            self.toggle_mode_nearby_var.set(False)
+            self.toggle_mode_conference_var.set(True)
+        if hasattr(self, 'eye_control_var'):
+            self.eye_control_var.set(False)
+
+        self.set_status("Conference mode activated: Optimized for large rooms with far distance (2-10cm gestures)")
+
+    def set_president_mode(self):
+        """Activate President Mode – open palm facing camera to change slides."""
+        self.base_zoom_factor = 1.0
+        self.dynamic_zoom = False
+        self.validate_posture = False
+        self.pointer_speed_multiplier = 2.0
+        self.enable_toggle_mode_nearby = True      # keep nearby gestures available
+        self.enable_toggle_mode_conference = False
+        self.enable_voice_control = False
+        self.enable_furniture_detection = False
+        self.teacher_mode_active = False
+        self.enable_pose_estimation = False
+        self.eye_control_enabled = False
+        self.president_mode = True                 # this is the key flag
+        self.mode_var.set("president")             # highlight the President radiobutton
+        self._update_settings_ui()
+
+        self.preferences.set('base_zoom_factor', self.base_zoom_factor)
+        self.preferences.set('dynamic_zoom', self.dynamic_zoom)
+        self.preferences.set('validate_posture', self.validate_posture)
+        self.preferences.set('pointer_speed', self.pointer_speed_multiplier)
+        self.preferences.set('enable_toggle_mode_nearby', self.enable_toggle_mode_nearby)
+        self.preferences.set('enable_toggle_mode_conference', self.enable_toggle_mode_conference)
+        self.preferences.set('mode', 'president')
+        self.preferences.set('teacher_mode', False)
+        self.preferences.set('enable_furniture_detection', False)
+        self.preferences.set('enable_voice_control', False)
+        self.preferences.set('president_mode', True)
+
+        # Update UI elements
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.set(self.base_zoom_factor)
+            self.dynamic_zoom_var.set(False)
+            self.posture_validation_var.set(False)
+            self.speed_slider.set(self.pointer_speed_multiplier)
+            self.toggle_mode_nearby_var.set(True)
+            self.toggle_mode_conference_var.set(False)
+        if hasattr(self, 'eye_control_var'):
+            self.eye_control_var.set(False)
+        if hasattr(self, 'president_mode_var'):
+            self.president_mode_var.set(True)
+
+        self.set_status("President mode activated – show open palm to change slides")
+
+    def set_custom_mode(self):
+        self.zoom_slider.config(state=tk.NORMAL)
+        self.dynamic_zoom_cb.config(state=tk.NORMAL)
+        self.posture_cb.config(state=tk.NORMAL)
+        self.speed_slider.config(state=tk.NORMAL)
+        self.toggle_nearby_cb.config(state=tk.NORMAL)
+        self.toggle_conference_cb.config(state=tk.NORMAL)
+        self.delay_slider.config(state=tk.NORMAL)
+        """Allow all settings to be customized manually"""
+        self.set_status("Custom mode activated: All settings can be adjusted individually")
+
+    def set_camera_normal_mode(self):
+        """Set camera processing to normal mode"""
+        self.camera_mode_var.set("normal")
+        self.process_control_mode = self._original_process_control_mode
+        self.preferences.set('camera_mode', 'normal')
+        self.set_status("Camera mode set to: Normal (basic tracking)")
+
+    def set_camera_high_mode(self):
+        """Set camera processing to high mode"""
+        self.camera_mode_var.set("high")
+        self.process_control_mode = self._high_process_control_mode
+        self.preferences.set('camera_mode', 'high')
+        self.set_status("Camera mode set to: High (enhanced precision with auto-centering)")
+
+    def setup_hotkeys(self):
+        keyboard.add_hotkey('f12', self.toggle_interface)
+        keyboard.add_hotkey('shift+f12', self.quit_application)
+
+    def update_video(self):
+        """Main video processing loop (runs in a separate thread)."""
+        while self.running:
+            try:
+                if self.cap is None:
+                    time.sleep(1)
+                    continue
+
+                ret, frame = self.cap.read()
+                if not ret:
+                    self._camera_failure_count += 1
+                    if self._camera_failure_count > self._camera_failure_threshold:
+                        if not self._camera_error_shown:
+                            self.show_camera_error()
+                        self.setup_camera()
+                        self._camera_failure_count = 0
+                    time.sleep(0.1)
+                    continue
+                else:
+                    self._camera_failure_count = 0
+
+                frame = cv2.flip(frame, 1)
+
+                if self.enable_voice_control and not self.pointer_mode:
+                    try:
+                        cv2.putText(frame, "VOICE CONTROL ACTIVE", (frame.shape[1] - 250, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    except:
+                        pass
+
+                if self.enable_pose_estimation:
+                    frame, posture = self.process_pose_estimation(frame)
+                    if posture:
+                        self.update_posture_status(posture)
+
+                if self.control_active:
+                    frame = self.process_control_mode(frame)
+
+                if self.show_camera and hasattr(self, 'video_label') and self.video_label.winfo_exists():
+                    self.update_display(frame)
+
+            except Exception as e:
+                print(f"Video processing error: {e}")
+                time.sleep(0.1)
+
+    def update_display(self, frame):
+        if not hasattr(self, 'video_label') or not self.video_label.winfo_exists():
+            return
+
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(img)
+        imgtk = ImageTk.PhotoImage(image=img)
+
+        self.video_label.imgtk = imgtk
+        self.video_label.configure(image=imgtk)
+
+    def update_slide_delay(self, value):
+        """Update the delay between slide changes"""
+        self.slide_delay = float(value)
+        self.preferences.set('slide_delay', self.slide_delay)
+        self.set_status(f"Slide delay set to: {self.slide_delay:.1f} seconds")
+
+    def update_pointer_speed(self, value):
+        """Update the pointer movement speed multiplier"""
+        speed = float(value)
+        self.pointer_speed_multiplier = speed
+        self.preferences.set('pointer_speed', speed)
+
+        if speed >= 7:
+            warning = " (High speed - Not recommended for far distances)"
+            color = self.colors["warning"]
+        else:
+            warning = ""
+            color = self.colors["text"]
+
+        self.set_status(f"Pointer speed set to: {speed:.1f}x{warning}")
+
+        if hasattr(self, 'speed_slider'):
+            self.speed_slider.config(fg=color if speed >= 7 else self.colors["text"])
+
+    def update_zoom_level(self, value):
+        """Update the base zoom level"""
+        self.base_zoom_factor = float(value)
+        self.preferences.set('base_zoom_factor', self.base_zoom_factor)
+        self.set_status(f"Base zoom level set to: {self.base_zoom_factor:.1f}x")
+
+    def update_posture_status(self, posture):
+        if hasattr(self, 'posture_status_var'):
+            self.posture_status_var.get()
+
+    def update_camera_list(self):
+        """Get friendly camera names using pygrabber."""
+        self.available_cameras = []
+        try:
+            from pygrabber.dshow_graph import FilterGraph
+            graph = FilterGraph()
+            devices = graph.get_input_devices()
+            for idx, name in enumerate(devices):
+                self.available_cameras.append((idx, name))
+        except Exception as e:
+            print(f"Could not enumerate cameras with pygrabber: {e}")
+            self.available_cameras = []
+            for i in range(10):
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    self.available_cameras.append((i, f"Camera {i}"))
+                    cap.release()
+
+        if not self.available_cameras:
+            self.available_cameras = [(0, "Default Camera")]
+
+        if self.selected_camera_index >= len(self.available_cameras):
+            self.selected_camera_index = 0
+
+    def update_microphone_list(self):
+        """List only input microphone devices, filtering out unwanted ones."""
+        self.available_microphones = []
+        try:
+            import pyaudio
+            p = pyaudio.PyAudio()
+            exclude_names = [
+                "stereo mix",
+                "what u hear",
+                "wave out",
+                "aux",
+                "headphones",
+                "speakers",
+            ]
+            for i in range(p.get_device_count()):
+                dev_info = p.get_device_info_by_index(i)
+                if dev_info['maxInputChannels'] > 0 and i != 0:
+                    name = dev_info['name']
+                    name_lower = name.lower()
+                    if any(excl in name_lower for excl in exclude_names):
+                        continue
+                    self.available_microphones.append((i, name))
+            p.terminate()
+        except Exception as e:
+            print(f"Could not enumerate microphones with pyaudio: {e}")
+            import speech_recognition as sr
+            names = sr.Microphone.list_microphone_names()
+            self.available_microphones = [(i, name) for i, name in enumerate(names) if i != 0]
+
+        if not self.available_microphones:
+            self.available_microphones = [(0, "Default Microphone")]
+
+        valid_indices = [idx for idx, _ in self.available_microphones]
+        if self.selected_microphone_index not in valid_indices:
+            print(
+                f"Saved microphone index {self.selected_microphone_index} not valid, resetting to {valid_indices[0] if valid_indices else 0}")
+            self.selected_microphone_index = valid_indices[0] if valid_indices else 0
+            self.preferences.set('microphone_index', self.selected_microphone_index)
+
+    def update_hold_time(self, value):
+        """Update the hold time from slider."""
+        self.hold_time = float(value)
+        self.preferences.set('hold_time', self.hold_time)
+
+    def update_click_cooldown(self, value):
+        """Update the click cooldown from slider."""
+        self.click_cooldown = float(value)
+        self.preferences.set('click_cooldown', self.click_cooldown)
+
+    def _update_settings_ui(self):
+        """Update all settings widgets to reflect current instance values."""
+        if hasattr(self, 'delay_slider'):
+            self.delay_slider.set(self.slide_delay)
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.set(self.base_zoom_factor)
+        if hasattr(self, 'speed_slider'):
+            self.speed_slider.set(self.pointer_speed_multiplier)
+        if hasattr(self, 'dynamic_zoom_var'):
+            self.dynamic_zoom_var.set(self.dynamic_zoom)
+        if hasattr(self, 'posture_validation_var'):
+            self.posture_validation_var.set(self.validate_posture)
+        if hasattr(self, 'toggle_mode_nearby_var'):
+            self.toggle_mode_nearby_var.set(self.enable_toggle_mode_nearby)
+        if hasattr(self, 'toggle_mode_conference_var'):
+            self.toggle_mode_conference_var.set(self.enable_toggle_mode_conference)
+        if hasattr(self, 'camera_mode_var'):
+            self.camera_mode_var.set(self.preferences.get('camera_mode', 'normal'))
+        if hasattr(self, 'pose_estimation_var'):
+            self.pose_estimation_var.set(self.enable_pose_estimation)
+        if hasattr(self, 'furniture_detection_var'):
+            self.furniture_detection_var.set(self.enable_furniture_detection)
+        if hasattr(self, 'teacher_mode_var'):
+            self.teacher_mode_var.set(self.teacher_mode_active)
+        if hasattr(self, 'voice_control_var'):
+            self.voice_control_var.set(self.enable_voice_control)
+        if hasattr(self, 'voice_lang_var'):
+            self.voice_lang_var.set(self.preferences.get('voice_language', 'en'))
+        if hasattr(self, 'eye_control_var'):
+            self.eye_control_var.set(self.eye_control_enabled)
+        if hasattr(self, 'hold_slider'):
+            self.hold_slider.set(self.hold_time)
+        if hasattr(self, 'cooldown_slider'):
+            self.cooldown_slider.set(self.click_cooldown)
+        if hasattr(self, 'laser_hotkey_var'):
+            self.laser_hotkey_var.set(self.use_laser_hotkey)
+        if hasattr(self, 'president_mode_var'):
+            self.president_mode_var.set(self.president_mode)
+
+    def toggle_dynamic_zoom(self):
+        """Toggle dynamic zoom adjustment"""
+        self.dynamic_zoom = self.dynamic_zoom_var.get()
+        self.preferences.set('dynamic_zoom', self.dynamic_zoom)
+        if self.dynamic_zoom:
+            self.shoulder_distance_ref = None
+            self.set_status("Dynamic zoom enabled - Zoom will adjust based on distance")
+        else:
+            self.set_status("Dynamic zoom disabled - Using fixed zoom level")
+
+    def toggle_posture_validation(self):
+        """Toggle posture validation"""
+        self.validate_posture = self.posture_validation_var.get()
+        self.preferences.set('validate_posture', self.validate_posture)
+        if self.validate_posture:
+            self.set_status("Posture validation enabled - System will only respond when standing straight")
+        else:
+            self.set_status("Posture validation disabled - System will respond to any posture")
+            if hasattr(self, 'posture_status'):
+                self.posture_status_var.set("Posture: Validation disabled")
+                self.posture_status.config(fg=self.colors["text"])
+
+    def toggle_mode_nearby_switch(self):
+        """Toggle nearby mode gesture detection"""
+        self.enable_toggle_mode_nearby = self.toggle_mode_nearby_var.get()
+        self.preferences.set('enable_toggle_mode_nearby', self.enable_toggle_mode_nearby)
+        if self.enable_toggle_mode_nearby:
+            self.enable_toggle_mode_conference = False
+            self.toggle_mode_conference_var.set(False)
+            self.preferences.set('enable_toggle_mode_conference', False)
+            self.set_status("Nearby toggle mode enabled - Hold two fingers raised for 2s to switch modes")
+        else:
+            self.set_status("Nearby toggle mode disabled")
+
+    def toggle_mode_conference_switch(self):
+        """Toggle conference mode gesture detection"""
+        self.enable_toggle_mode_conference = self.toggle_mode_conference_var.get()
+        self.preferences.set('enable_toggle_mode_conference', self.enable_toggle_mode_conference)
+        if self.enable_toggle_mode_conference:
+            self.enable_toggle_mode_nearby = False
+            self.toggle_mode_nearby_var.set(False)
+            self.preferences.set('enable_toggle_mode_nearby', False)
+            self.set_status("Conference toggle mode enabled - Hold hands apart for 3s to switch modes")
+        else:
+            self.set_status("Conference toggle mode disabled")
+
+    def toggle_pose_estimation(self):
+        """Toggle pose estimation feature"""
+        self.enable_pose_estimation = self.pose_estimation_var.get()
+        self.preferences.set('enable_pose_estimation', self.enable_pose_estimation)
+        if self.enable_pose_estimation:
+            self.set_status("Pose estimation enabled - System will detect standing/sitting posture")
+            if not self.pose_estimation_model:
+                self.initialize_pose_estimation()
+        else:
+            self.set_status("Pose estimation disabled")
+            if hasattr(self, 'posture_status_var'):
+                self.posture_status_var.set("Posture: Detection off")
+                self.posture_status.config(fg=self.colors["text"])
+
+    def toggle_furniture_detection(self):
+        """Toggle furniture detection feature"""
+        self.enable_furniture_detection = self.furniture_detection_var.get()
+        self.preferences.set('enable_furniture_detection', self.enable_furniture_detection)
+        if self.enable_furniture_detection:
+            if self.furniture_model is None:
+                self.load_furniture_model()
+            self.set_status("Furniture detection enabled - Will detect chairs and tables")
+        else:
+            self.set_status("Furniture detection disabled")
+
+    def toggle_teacher_mode(self):
+        """Toggle teacher/student mode"""
+        self.teacher_mode_active = self.teacher_mode_var.get()
+        self.preferences.set('teacher_mode_active', self.teacher_mode_active)
+        status = "ON (Only teacher can control)" if self.teacher_mode_active else "OFF (Anyone can control)"
+        self.set_status(f"Teacher mode {status}")
+
+    def toggle_interface(self):
+        if self.root.state() == 'normal':
+            self.root.withdraw()
+        else:
+            self.root.deiconify()
+
+    def toggle_eye_control(self):
+        """Enable/disable eye control feature."""
+        self.eye_control_enabled = self.eye_control_var.get()
+        self.preferences.set('eye_control_enabled', self.eye_control_enabled)
+        if self.eye_control_enabled:
+            self.set_status("Eye control enabled – hold one eye closed to click (only in pointer mode)")
+        else:
+            self.set_status("Eye control disabled")
+
+    def toggle_pinch_click(self):
+        self.pinch_click_enabled = self.pinch_click_var.get()
+        self.preferences.set('pinch_click_enabled', self.pinch_click_enabled)
+        if self.pinch_click_enabled:
+            self.set_status("Pinch click enabled (Nearby mode)")
+        else:
+            self.set_status("Pinch click disabled")
+
+    def toggle_laser_hotkey(self):
+        self.use_laser_hotkey = self.laser_hotkey_var.get()
+        self.preferences.set('use_laser_hotkey', self.use_laser_hotkey)
+        status = "enabled" if self.use_laser_hotkey else "disabled"
+        self.set_status(f"Ctrl+L laser pointer hotkey {status}")
+
+    def toggle_president_mode(self):
+        self.president_mode = self.president_mode_var.get()
+        self.preferences.set('president_mode', self.president_mode)
+        if self.president_mode:
+            self.set_status("President mode enabled – show open palm to change slides")
+        else:
+            self.set_status("President mode disabled")
+
+    def switch_camera(self, index):
+        """Change the active camera to the given index (thread‑safe)."""
+        print(f"🔄 Switching camera to index {index}...")
+        self.set_status("⏳ Switching camera...")
+        if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+            self.current_settings_status_label.config(text="⏳ Switching camera...", fg=self.colors["text"])
+
+        new_cap = cv2.VideoCapture(index)
+        if new_cap.isOpened():
+            new_cap.set(3, self.width)
+            new_cap.set(4, self.height)
+            time.sleep(0.3)
+
+            old_cap = self.cap
+            self.cap = new_cap
+            if old_cap:
+                old_cap.release()
+
+            self.selected_camera_index = index
+            self.preferences.set('camera_index', index)
+            self._camera_failure_count = 0
+            self._camera_error_shown = False
+
+            camera_name = next((name for idx, name in self.available_cameras if idx == index), f"Camera {index}")
+            success_msg = f"✅ Camera switched to {camera_name}"
+            print(success_msg)
+            self.set_status(success_msg)
+            if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+                self.current_settings_status_label.config(text=success_msg, fg="green")
+        else:
+            error_msg = f"❌ Failed to open camera {index}, keeping current camera"
+            print(error_msg)
+            self.set_status(error_msg)
+            if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+                self.current_settings_status_label.config(text=error_msg, fg="red")
+
+    def switch_microphone(self, device_index):
+        """Change the active microphone device (device_index is the actual PyAudio index)."""
+        print(f"🔄 Switching microphone to device index {device_index}...")
+        self.set_status("⏳ Switching microphone...")
+        if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+            self.current_settings_status_label.config(text="⏳ Switching microphone...", fg=self.colors["text"])
+
+        try:
+            name = next((n for idx, n in self.available_microphones if idx == device_index), f"Device {device_index}")
+
+            self.selected_microphone_index = device_index
+            self.preferences.set('microphone_index', device_index)
+
+            success_msg = f"✅ Microphone switched to {name}"
+            print(success_msg)
+            self.set_status(success_msg)
+            if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+                self.current_settings_status_label.config(text=success_msg, fg="green")
+
+            if self.enable_voice_control:
+                self.stop_voice_recognition()
+                self.start_voice_recognition()
+        except Exception as e:
+            error_msg = f"❌ Error switching microphone: {e}"
+            print(error_msg)
+            self.set_status(error_msg)
+            if hasattr(self, 'current_settings_status_label') and self.current_settings_status_label:
+                self.current_settings_status_label.config(text=error_msg, fg="red")
+
+    def apply_basic_preferences(self):
+        """Apply only the basic preferences that are safe to apply before UI is fully initialized"""
+        self.current_theme = self.preferences.get('theme', 'Default')
+        self.colors = THEMES[self.current_theme]
+
+        self.slide_delay = self.preferences.get('slide_delay', 1.0)
+        self.base_zoom_factor = self.preferences.get('base_zoom_factor', 1.0)
+        self.dynamic_zoom = self.preferences.get('dynamic_zoom', False)
+        self.validate_posture = self.preferences.get('validate_posture', False)
+        self.pointer_speed_multiplier = self.preferences.get('pointer_speed', 2.5)
+        self.enable_toggle_mode_nearby = self.preferences.get('enable_toggle_mode_nearby', True)
+        self.enable_toggle_mode_conference = self.preferences.get('enable_toggle_mode_conference', False)
+        self.enable_pose_estimation = self.preferences.get('enable_pose_estimation', False)
+        self.enable_furniture_detection = self.preferences.get('enable_furniture_detection', False)
+        self.teacher_mode_active = self.preferences.get('teacher_mode_active', False)
+        self.enable_voice_control = self.preferences.get('enable_voice_control', False)
+        self.selected_camera_index = self.preferences.get('camera_index', 0)
+        self.selected_microphone_index = self.preferences.get('microphone_index', 0)
+
+        self.eye_control_enabled = self.preferences.get('eye_control_enabled', False)
+        self.hold_time = self.preferences.get('hold_time', 0.3)
+        self.click_cooldown = self.preferences.get('click_cooldown', 1.5)
+        self.calibrated_threshold = self.preferences.get('calibrated_threshold', None)
+
+        self.configure_styles()
+
+    def apply_camera_selection(self):
+        selected_name = self.camera_combo.get()
+        for idx, name in self.available_cameras:
+            if name == selected_name:
+                self.set_status("⏳ Applying camera change...")
+                self.switch_camera(idx)
+                break
+
+    def apply_microphone_selection(self):
+        selected_name = self.microphone_combo.get()
+        for idx, name in self.available_microphones:
+            if name == selected_name:
+                self.switch_microphone(idx)
+                break
+
+    def refresh_microphone_list(self):
+        self.update_microphone_list()
+        self.microphone_combo['values'] = [name for idx, name in self.available_microphones]
+        for idx, name in self.available_microphones:
+            if idx == self.selected_microphone_index:
+                self.microphone_combo.set(name)
+                break
+
+    def refresh_camera_list(self):
+        self.update_camera_list()
+        self.camera_combo['values'] = [name for idx, name in self.available_cameras]
+        if self.available_cameras and self.selected_camera_index is not None:
+            if 0 <= self.selected_camera_index < len(self.available_cameras):
+                self.camera_combo.set(self.available_cameras[self.selected_camera_index][1])
+
+    def start_video_thread(self):
+        self.video_thread = threading.Thread(target=self.update_video)
+        self.video_thread.daemon = True
+        self.video_thread.start()
+
+    def start_eye_calibration(self):
+        """Start the eye threshold calibration process."""
+        self.calibrating_eye = True
+        self.calib_frames = []
+        self.set_status("Eye calibration started – keep eyes open and face visible")
+
+    def start_control(self):
+        self.control_active = True
+        self.show_camera = True
+        self.pointer_mode = False
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+
+        if self.enable_toggle_mode_nearby:
+            instructions = (
+                "NEARBY MODE ACTIVE\n\n"
+                "• Left hand up: Previous slide\n"
+                "• Right hand up: Next slide\n"
+                "• Hold two fingers raised for 2s: Toggle pointer mode"
+            )
+        else:  # Conference mode
+            instructions = (
+                "CONFERENCE MODE ACTIVE\n\n"
+                "• Stand straight facing camera\n"
+                "• Left hand up: Previous slide\n"
+                "• Right hand up: Next slide\n"
+                "• Hold hands near camera for 3s: Toggle pointer mode"
+            )
+
+        self.set_status(instructions)
+
+    def stop_control(self):
+        try:
+            self.control_active = False
+            self.show_camera = False
+
+            if hasattr(self, 'start_btn') and self.start_btn.winfo_exists():
+                self.start_btn.config(state=tk.NORMAL)
+            if hasattr(self, 'stop_btn') and self.stop_btn.winfo_exists():
+                self.stop_btn.config(state=tk.DISABLED)
+
+            self.pointer_mode = False
+            self.prev_x, self.prev_y = 0, 0
+
+            self.set_status("Control stopped")
+
+            if hasattr(self, 'posture_status') and self.posture_status.winfo_exists():
+                self.posture_status_var.set("Posture: Not detected")
+                self.posture_status.config(fg=self.colors["text"])
+        except Exception as e:
+            print(f"Error in stop_control: {e}")
+
+    def clear_frame(self):
+        for widget in self.root.winfo_children():
+            if widget not in [self.root.children['!menu']]:
+                widget.destroy()
+
+    def quit_application(self):
+        self.running = False
+        if self.cap.isOpened():
+            self.cap.release()
+        if hasattr(self, 'face_mesh'):
+            self.face_mesh.close()
+        self.root.destroy()
+        sys.exit()
+
+    def on_closing(self):
+        self.stop_voice_recognition()
+        if self.voice_recognizer:
+            self.voice_recognizer.save_user_profile()
+        self.quit_application()
+
+
+if __name__ == "__main__":
+    if os.name == 'nt':
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.tagemouati.pwcv')
+
+    root = tk.Tk()
+    app = PoseGestureControl(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()

@@ -1,0 +1,88 @@
+# Core Libraries
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# GUI and Interaction
+pyautogui>=0.9.53
+tkinter  # Built-in with Python
+keyboard>=0.13.5
+PyAutoGUI>=0.9.53
+
+# Speech Recognition
+SpeechRecognition>=3.10.0
+pydub>=0.25.1
+
+# Computer Vision and AI
+mediapipe>=0.10.0
+ultralytics>=8.0.0  # YOLO
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Web and Networking
+webbrowser  # Built-in with Python
+
+# Audio Processing
+sounddevice>=0.4.5
+soundfile>=0.12.1
+
+# Data Processing
+pandas>=2.0.0
+
+# Utilities
+bleak>=0.20.0  # Bluetooth support
+requests>=2.31.0
+
+# Additional dependencies from original requirements
+absl-py
+adodbapi
+aiosmtpd
+albucore
+albumentations
+altgraph
+annotated-types
+astunparse
+async-timeout
+atpublic
+attrs
+blinker
+blurhash
+face-recognition-models
+Faker
+filelock
+fitz
+Flask
+flatbuffers
+fonttools
+fsspec
+gast
+google-pasta
+greenlet
+grpcio
+h5py
+huggingface-hub
+imageio
+isapi
+itsdangerous
+jax
+jaxlib
+Jinja2
+jmespath
+joblib
+keras
+kiwisolver
+lazy_loader
+lief
+lxml
+magic
+Markdown
+markdown-it-py
+MarkupSafe
+Mastodon.py
+matplotlib
+mdurl
+ml-dtypes
+MouseInfo
+mpmath
+namex
+networkx

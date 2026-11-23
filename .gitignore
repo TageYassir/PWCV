@@ -1,0 +1,94 @@
+# Environments & IDE
+.venv/
+Lib/
+.git/
+.idea/
+Attempt/*
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Packaged / compiled output
+PWCV.spec
+
+# Model weights (large binaries)
+yolov8n.pt
+
+# Generated data / user profiles
+*.pkl
+user_preferences.json
+.swcv_preferences.json
+registered_persons/
+presenter_profiles/
+
+# Media assets generated at runtime
+*.jpg
+*.png
+
+# Presentations / large assets
+numbered_slides_200.pptx
+app.ico
+Attempt/attempt_9/classDiagram.puml
+Attempt/attempt_9/nearbyUseCase.puml
+Attempt/attempt_9/sequence1.puml
+attempt_9/classDiagram.puml
+attempt_9/nearbyUseCase.puml
+attempt_9/sequence1.puml
+Attempt/include/cx_Logging.h
+Attempt/include/site/python3.10/greenlet/greenlet.h
+Attempt/include/site/python3.10/pygame/_blit_info.h
+Attempt/include/site/python3.10/pygame/_camera.h
+Attempt/include/site/python3.10/pygame/_pygame.h
+Attempt/include/site/python3.10/pygame/_surface.h
+Attempt/include/site/python3.10/pygame/camera.h
+Attempt/include/site/python3.10/pygame/font.h
+Attempt/include/site/python3.10/pygame/freetype.h
+Attempt/include/site/python3.10/pygame/mask.h
+Attempt/include/site/python3.10/pygame/mixer.h
+Attempt/include/site/python3.10/pygame/palette.h
+Attempt/include/site/python3.10/pygame/pgarrinter.h
+Attempt/include/site/python3.10/pygame/pgbufferproxy.h
+Attempt/include/site/python3.10/pygame/pgcompat.h
+Attempt/include/site/python3.10/pygame/pgopengl.h
+Attempt/include/site/python3.10/pygame/pgplatform.h
+Attempt/include/site/python3.10/pygame/pygame.h
+Attempt/include/site/python3.10/pygame/scrap.h
+Attempt/include/site/python3.10/pygame/simd_blitters.h
+Attempt/include/site/python3.10/pygame/surface.h
+Attempt/include/site/python3.10/pygame/include/_pygame.h
+Attempt/include/site/python3.10/pygame/include/bitmask.h
+Attempt/include/site/python3.10/pygame/include/pgcompat.h
+Attempt/include/site/python3.10/pygame/include/pgimport.h
+Attempt/include/site/python3.10/pygame/include/pgplatform.h
+Attempt/include/site/python3.10/pygame/include/pygame_bufferproxy.h
+Attempt/include/site/python3.10/pygame/include/pygame_font.h
+Attempt/include/site/python3.10/pygame/include/pygame_freetype.h
+Attempt/include/site/python3.10/pygame/include/pygame_mask.h
+Attempt/include/site/python3.10/pygame/include/pygame_mixer.h
+Attempt/include/site/python3.10/pygame/include/pygame.h
+Attempt/include/site/python3.10/pygame/include/sse2neon.h
+tkhrbi9/tst.py
+Big_data_courses_RAG.ipynb
+generator_pptx.py
+gitignore_py.py
+project_structure_report.txt
+SWCV/attempt_1/App_v1.py
+SWCV/attempt_1/cookies.py
+SWCV/attempt_2/App_v2.py
+SWCV/attempt_2/cookies.py
+SWCV/attempt_3/App_v3.py
+SWCV/attempt_3/cookies.py
+SWCV/attempt_4/App_v4_preferences.py
+SWCV/attempt_4/cookies.py
+SWCV/attempt_5/App_v5_ui.py
+SWCV/attempt_5/cookies.py
+SWCV/attempt_6/App_v6_camError.py
+SWCV/attempt_6/cookies.py
