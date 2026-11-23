@@ -5,7 +5,7 @@
 > **Project status:** Experimental / archived. The repository contains several development attempts and proof-of-concept applications. Features and stability vary between versions.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
 ![Status](https://img.shields.io/badge/Status-Archived%20Prototype-orange.svg)
 
@@ -40,7 +40,7 @@ The most advanced available iteration is under `attempt_18/`, with `App_v21_near
 ### Prerequisites
 
 - Windows 10 or later is recommended
-- Python 3.10 or later
+- Python 3.8 or later
 - A webcam
 - `pip` and a virtual-environment tool
 - A presentation application such as Microsoft PowerPoint
